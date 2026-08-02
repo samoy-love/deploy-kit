@@ -80,6 +80,22 @@ while IFS= read -r c; do CONFD+=("$(basename "$c")"); done \
 SUDOERS_SRC="$KIT_DIR/server/sudoers.d/deploy-kit"
 SUDOERS_DEST="/etc/sudoers.d/deploy-kit"
 
+# Хеш файла на сервере; пустая строка — файла нет.
+#
+# `sudo test -f` ПЕРЕД чтением, и чтение через `sudo cat`, а не `sudo tr < файл`:
+# перенаправление выполняет шелл вызывающего, то есть ДО sudo, и на файле,
+# закрытом от него (0440 root:root в /etc/sudoers.d), падает с permission denied.
+# Хеш при этом считался бы от пустого ввода — то есть был бы валидным хешем
+# пустой строки, а не признаком отсутствия файла.
+#
+# Раньше отсутствие ловилось сравнением с `d41d8cd98f00`. Это пустой MD5, а
+# считается здесь sha256, у которой пустая строка даёт `e3b0c44298fc`, — то
+# есть условие не срабатывало никогда, и отсутствующий файл показывался как
+# «разошлось» с загадочным хешем, а в stderr текла ошибка доступа.
+remote_hash() {
+    "${SSH[@]}" "sudo test -f '$1' && sudo cat '$1' | tr -d '\r' | sha256sum | cut -c1-12" 2>/dev/null || true
+}
+
 # На сервере обязана оказаться версия, прошедшая ревью и CI, а не та, что
 # случайно лежит в рабочей копии. Проверка не теоретическая: выкладка уже
 # один раз увезла на прод недоделанный nginx-apply.sh с чужой ветки — просто
@@ -107,8 +123,8 @@ printf '\n%sЧто на сервере %s:%s\n' "$BLD" "$DEST" "$RST"
 drift=()
 for f in "${FILES[@]}"; do
     lh="$(tr -d '\r' < "$KIT_DIR/server/$f" | sha256sum | cut -c1-12)"
-    rh="$("${SSH[@]}" "sudo tr -d '\r' < '$DEST/$f' 2>/dev/null | sha256sum | cut -c1-12" || true)"
-    if [[ -z "$rh" || "$rh" == *"d41d8cd98f00"* ]]; then
+    rh="$(remote_hash "$DEST/$f")"
+    if [[ -z "$rh" ]]; then
         printf '  %-16s %sнет на сервере%s\n' "$f" "$YEL" "$RST"; drift+=("$f")
     elif [[ "$lh" == "$rh" ]]; then
         printf '  %-16s %sсовпадает%s\n' "$f" "$DIM" "$RST"
@@ -122,8 +138,8 @@ printf '\n%sЧто на сервере /etc/nginx/snippets:%s\n' "$BLD" "$RST"
 sdrift=()
 for s in "${SNIPPETS[@]}"; do
     lh="$(tr -d '\r' < "$KIT_DIR/nginx/snippets/$s" | sha256sum | cut -c1-12)"
-    rh="$("${SSH[@]}" "sudo tr -d '\r' < '/etc/nginx/snippets/$s' 2>/dev/null | sha256sum | cut -c1-12" || true)"
-    if [[ -z "$rh" || "$rh" == *"d41d8cd98f00"* ]]; then
+    rh="$(remote_hash "/etc/nginx/snippets/$s")"
+    if [[ -z "$rh" ]]; then
         printf '  %-34s %sнет на сервере%s\n' "$s" "$YEL" "$RST"; sdrift+=("$s")
     elif [[ "$lh" == "$rh" ]]; then
         printf '  %-34s %sсовпадает%s\n' "$s" "$DIM" "$RST"
@@ -137,8 +153,8 @@ printf '\n%sЧто на сервере /etc/nginx/conf.d:%s\n' "$BLD" "$RST"
 cdrift=()
 for c in "${CONFD[@]}"; do
     lh="$(tr -d '\r' < "$KIT_DIR/nginx/conf.d/$c" | sha256sum | cut -c1-12)"
-    rh="$("${SSH[@]}" "sudo tr -d '\r' < '/etc/nginx/conf.d/$c' 2>/dev/null | sha256sum | cut -c1-12" || true)"
-    if [[ -z "$rh" || "$rh" == *"d41d8cd98f00"* ]]; then
+    rh="$(remote_hash "/etc/nginx/conf.d/$c")"
+    if [[ -z "$rh" ]]; then
         printf '  %-34s %sнет на сервере%s\n' "$c" "$YEL" "$RST"; cdrift+=("$c")
     elif [[ "$lh" == "$rh" ]]; then
         printf '  %-34s %sсовпадает%s\n' "$c" "$DIM" "$RST"
@@ -153,11 +169,7 @@ if (( WITH_SUDOERS )); then
     [[ -f "$SUDOERS_SRC" ]] || die "нет $SUDOERS_SRC"
     printf '\n%sЧто на сервере /etc/sudoers.d:%s\n' "$BLD" "$RST"
     lh="$(tr -d '\r' < "$SUDOERS_SRC" | sha256sum | cut -c1-12)"
-    # `sudo cat`, а не `sudo tr < файл`: перенаправление выполняет шелл
-    # ВЫЗЫВАЮЩЕГО, то есть до sudo, и на файле 0440 root:root оно падает с
-    # permission denied. Хеш считался бы от пустого ввода, и «совпадает» не
-    # наступало бы никогда — проверка молча всегда показывала бы расхождение.
-    rh="$("${SSH[@]}" "sudo test -f '$SUDOERS_DEST' && sudo cat '$SUDOERS_DEST' | tr -d '\r' | sha256sum | cut -c1-12" 2>/dev/null || true)"
+    rh="$(remote_hash "$SUDOERS_DEST")"
     if [[ -z "$rh" ]]; then
         printf '  %-34s %sнет на сервере%s\n' "deploy-kit" "$YEL" "$RST"; sudoers_drift=1
     elif [[ "$lh" == "$rh" ]]; then
