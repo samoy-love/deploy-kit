@@ -71,8 +71,10 @@ jobs:
             echo "version_url=${VERSION_URL:-}"
             echo "neighbours=${NEIGHBOURS:-}"
             echo "goarch=${GOARCH:-arm64}"
-            echo "build_cmd=${BUILD_CMD:-}"
           } >> "$GITHUB_OUTPUT"
+          # BUILD_CMD через outputs НЕ передаём: внутри него есть свои кавычки
+          # (-ldflags "-s -w -X ..."), и любая повторная подстановка рвёт
+          # строку. Шаг сборки читает описание сам.
 
       - name: Версия релиза
         id: ver
@@ -94,11 +96,18 @@ jobs:
           DEPLOY_VERSION: ${{ steps.ver.outputs.version }}
           DEPLOY_GOARCH: ${{ steps.cfg.outputs.goarch }}
         run: |
-          # Сборка описана в самом проекте: у сервиса может быть не один
-          # бинарь и своя статика рядом.
-          bash -c "${{ steps.cfg.outputs.build_cmd }}"
-          [ -d "${{ steps.cfg.outputs.artifact_dir }}" ] || {
-            echo "::error::сборка не создала ${{ steps.cfg.outputs.artifact_dir }}"; exit 1; }
+          # Описание читаем здесь же и выполняем команду как есть — так строка
+          # доезжает до shell в точности такой, какой её написали в проекте.
+          set -a; . "$GITHUB_WORKSPACE/${{ inputs.config }}"; set +a
+          eval "$BUILD_CMD"
+
+          D="${{ steps.cfg.outputs.artifact_dir }}"
+          [ -d "$D" ] || { echo "::error::сборка не создала $D"; exit 1; }
+          # Пустой каталог — тоже провал. Без этой проверки на сервер уезжал
+          # артефакт без бинаря, systemd падал с 203/EXEC, и выкатка
+          # откатывалась — верно, но причина пряталась в конце цепочки.
+          [ -n "$(ls -A "$D")" ] || { echo "::error::каталог $D пуст — сборка ничего не создала"; exit 1; }
+          echo "Собрано:"; ls -la "$D"
 
       - name: Отметить версию
         working-directory: ${{ inputs.workdir }}
