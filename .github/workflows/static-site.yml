@@ -90,7 +90,7 @@ jobs:
           # сервере сразу видно, пайплайн его положил или человек руками.
           # Тег, если стоим ровно на нём, — иначе дата и короткий коммит.
           V="$(git describe --tags --exact-match 2>/dev/null || true)"
-          [ -n "$V" ] || V="release-$(date -u '+%Y%m%d-%H%M%S')-$(git rev-parse --short HEAD)"
+          [ -n "$V" ] || V="release-$(TZ=Europe/Moscow date '+%Y%m%d-%H%M%S')-$(git rev-parse --short HEAD)"
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "Версия: $V"
 
@@ -120,7 +120,7 @@ jobs:
         run: |
           printf '{"version":"%s","commit":"%s","builtAt":"%s"}\n' \
             "${{ steps.ver.outputs.version }}" "$(git rev-parse --short HEAD)" \
-            "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "${{ steps.cfg.outputs.artifact_dir }}/version.json"
+            "$(TZ=Europe/Moscow date '+%Y-%m-%dT%H:%M:%S+03:00')" > "${{ steps.cfg.outputs.artifact_dir }}/version.json"
 
       - name: Упаковать
         run: |
