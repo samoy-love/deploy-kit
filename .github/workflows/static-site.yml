@@ -121,6 +121,13 @@ jobs:
             echo "artifact_dir=$ARTIFACT_DIR"
             echo "root=$ROOT"
             echo "owner=${OWNER:-}"
+            # UNIT здесь не про Go. Цель может раздаваться статикой и при этом
+            # иметь юнит-обёртку, который нужно перезапустить после
+            # переключения симлинка, — так устроен стек мониторинга: артефакт
+            # это конфиги, а применяет их `systemctl restart`. Пока входа не
+            # было, такой цели не подходил ни один пайплайн: go-service.yml
+            # требует go.mod, которого у неё нет.
+            echo "unit=${UNIT:-}"
             echo "health=${HEALTH:-}"
             echo "notify=${NOTIFY:-all}"
             echo "version_url=${VERSION_URL:-}"
@@ -243,7 +250,9 @@ jobs:
           USER: ${{ secrets.DEPLOY_USER }}
         run: |
           ssh -i ~/.ssh/deploy_key "$USER@$HOST" \
-            "sudo /opt/deploy-kit/preflight.sh --app '${{ steps.cfg.outputs.app }}' --root '${{ steps.cfg.outputs.root }}'"
+            "sudo /opt/deploy-kit/preflight.sh --app '${{ steps.cfg.outputs.app }}' \
+               --root '${{ steps.cfg.outputs.root }}' \
+               ${{ steps.cfg.outputs.unit && format('--units ''{0}''', steps.cfg.outputs.unit) || '' }}"
 
       - name: Обновить конфиг nginx
         if: inputs.nginx-conf != '' && steps.cfg.outputs.nginx_dest != ''
@@ -268,6 +277,7 @@ jobs:
           ARGS="--app '${{ steps.cfg.outputs.app }}' --version '${{ steps.ver.outputs.version }}'"
           ARGS="$ARGS --archive '$REMOTE' --root '${{ steps.cfg.outputs.root }}'"
           [ -n "${{ steps.cfg.outputs.owner }}" ]       && ARGS="$ARGS --owner '${{ steps.cfg.outputs.owner }}'"
+          [ -n "${{ steps.cfg.outputs.unit }}" ]        && ARGS="$ARGS --unit '${{ steps.cfg.outputs.unit }}'"
           [ -n "${{ steps.cfg.outputs.health }}" ]      && ARGS="$ARGS --health '${{ steps.cfg.outputs.health }}'"
           [ -n "${{ steps.cfg.outputs.version_url }}" ] && ARGS="$ARGS --version-url '${{ steps.cfg.outputs.version_url }}'"
           [ -n "${{ steps.cfg.outputs.neighbours }}" ]  && ARGS="$ARGS --neighbours '${{ steps.cfg.outputs.neighbours }}'"
