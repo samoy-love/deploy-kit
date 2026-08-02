@@ -1,0 +1,197 @@
+name: go-service
+
+# Переиспользуемый пайплайн для Go-сервисов с systemd.
+#
+# Отличия от static-site: кросс-сборка под архитектуру сервера, перезапуск
+# юнита вместо reload nginx и версия, вшитая в бинарь через -ldflags.
+#
+#   jobs:
+#     deploy:
+#       uses: tr0llex/deploy-kit/.github/workflows/go-service.yml@main
+#       with:
+#         config: .deploy-kit/prod.env
+#         gates: go vet ./... && go test -race ./...
+#       secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      config:
+        required: true
+        type: string
+      gates:
+        description: 'Полный регресс. Красный = выкатки нет'
+        required: true
+        type: string
+      go-version-file:
+        required: false
+        type: string
+        default: go.mod
+      workdir:
+        description: 'Каталог модуля Go, если он не в корне'
+        required: false
+        type: string
+        default: '.'
+      dry-run:
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: deploy-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ inputs.workdir }}/${{ inputs.go-version-file }}
+          cache-dependency-path: ${{ inputs.workdir }}/go.sum
+
+      - name: Прочитать описание цели
+        id: cfg
+        run: |
+          [ -f "${{ inputs.config }}" ] || { echo "::error::нет файла ${{ inputs.config }}"; exit 1; }
+          set -a; . "${{ inputs.config }}"; set +a
+          for v in APP ARTIFACT_DIR ROOT; do
+            [ -n "${!v}" ] || { echo "::error::в описании не задано $v"; exit 1; }
+          done
+          {
+            echo "app=$APP"
+            echo "artifact_dir=$ARTIFACT_DIR"
+            echo "root=$ROOT"
+            echo "owner=${OWNER:-}"
+            echo "unit=${UNIT:-}"
+            echo "health=${HEALTH:-}"
+            echo "version_url=${VERSION_URL:-}"
+            echo "neighbours=${NEIGHBOURS:-}"
+            echo "goarch=${GOARCH:-arm64}"
+            echo "build_cmd=${BUILD_CMD:-}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Версия релиза
+        id: ver
+        run: |
+          V="$(git describe --tags --exact-match 2>/dev/null || true)"
+          [ -n "$V" ] || V="$(date -u '+%Y%m%d-%H%M%S')-$(git rev-parse --short HEAD)"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      # Регресс идёт под архитектурой раннера — тесты должны выполняться,
+      # а не кросс-компилироваться. Гонки ищутся именно здесь: -race не
+      # работает при кросс-сборке.
+      - name: Полный регресс
+        working-directory: ${{ inputs.workdir }}
+        run: ${{ inputs.gates }}
+
+      - name: Собрать артефакт
+        working-directory: ${{ inputs.workdir }}
+        env:
+          DEPLOY_VERSION: ${{ steps.ver.outputs.version }}
+          DEPLOY_GOARCH: ${{ steps.cfg.outputs.goarch }}
+        run: |
+          # Сборка описана в самом проекте: у сервиса может быть не один
+          # бинарь и своя статика рядом.
+          bash -c "${{ steps.cfg.outputs.build_cmd }}"
+          [ -d "${{ steps.cfg.outputs.artifact_dir }}" ] || {
+            echo "::error::сборка не создала ${{ steps.cfg.outputs.artifact_dir }}"; exit 1; }
+
+      - name: Отметить версию
+        working-directory: ${{ inputs.workdir }}
+        run: |
+          D="${{ steps.cfg.outputs.artifact_dir }}"
+          # Кладём в public/, если он есть: тогда версия доступна по /version.json
+          # тем же способом, что и у статики, и её сверяет шаг проверки.
+          T="$D/public"; [ -d "$T" ] || T="$D"
+          printf '{"version":"%s","commit":"%s","builtAt":"%s"}\n' \
+            "${{ steps.ver.outputs.version }}" "$(git rev-parse --short HEAD)" \
+            "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$T/version.json"
+
+      - name: Упаковать
+        working-directory: ${{ inputs.workdir }}
+        run: |
+          tar -czf /tmp/artifact.tar.gz -C "${{ steps.cfg.outputs.artifact_dir }}" .
+          echo "Размер: $(du -h /tmp/artifact.tar.gz | cut -f1)"
+          sha256sum /tmp/artifact.tar.gz
+
+      - name: Настроить SSH
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST_KEY: ${{ secrets.SSH_HOST_KEY }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          if [ -n "$HOST_KEY" ]; then
+            printf '%s\n' "$HOST_KEY" > ~/.ssh/known_hosts
+          else
+            echo "::warning::SSH_HOST_KEY не задан"
+            ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          fi
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Предусловия на хосте
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy_key "$USER@$HOST" \
+            "sudo /opt/deploy-kit/preflight.sh --app '${{ steps.cfg.outputs.app }}' \
+               --root '${{ steps.cfg.outputs.root }}' \
+               ${{ steps.cfg.outputs.unit && format('--units ''{0}''', steps.cfg.outputs.unit) || '' }}"
+
+      - name: Выкатить
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          REMOTE=/tmp/${{ steps.cfg.outputs.app }}-${{ steps.ver.outputs.version }}.tar.gz
+          scp -i ~/.ssh/deploy_key /tmp/artifact.tar.gz "$USER@$HOST:$REMOTE"
+
+          ARGS="--app '${{ steps.cfg.outputs.app }}' --version '${{ steps.ver.outputs.version }}'"
+          ARGS="$ARGS --archive '$REMOTE' --root '${{ steps.cfg.outputs.root }}'"
+          [ -n "${{ steps.cfg.outputs.unit }}" ]        && ARGS="$ARGS --unit '${{ steps.cfg.outputs.unit }}'"
+          [ -n "${{ steps.cfg.outputs.owner }}" ]       && ARGS="$ARGS --owner '${{ steps.cfg.outputs.owner }}'"
+          [ -n "${{ steps.cfg.outputs.health }}" ]      && ARGS="$ARGS --health '${{ steps.cfg.outputs.health }}'"
+          [ -n "${{ steps.cfg.outputs.version_url }}" ] && ARGS="$ARGS --version-url '${{ steps.cfg.outputs.version_url }}'"
+          [ -n "${{ steps.cfg.outputs.neighbours }}" ]  && ARGS="$ARGS --neighbours '${{ steps.cfg.outputs.neighbours }}'"
+          ${{ inputs.dry-run && 'ARGS="$ARGS --dry-run"' || 'true' }}
+
+          # Выкатка запускается transient-юнитом, а не просто командой по SSH.
+          # Разрыв соединения посылает SIGHUP удалённому процессу: выкатка
+          # умерла бы между переключением симлинка и healthcheck, то есть
+          # ровно там, где автооткат ещё не отработал, и прод остался бы на
+          # непроверенном релизе. systemd-run переживает разрыв.
+          CMD="sudo /opt/deploy-kit/release.sh $ARGS"
+          ssh -i ~/.ssh/deploy_key "$USER@$HOST" "
+            if command -v systemd-run >/dev/null 2>&1; then
+              sudo systemd-run --wait --collect --quiet --pipe --unit=deploy-${{ steps.cfg.outputs.app }}-$$ $CMD
+            else
+              $CMD
+            fi"
+          ssh -i ~/.ssh/deploy_key "$USER@$HOST" "rm -f '$REMOTE'" || true
+
+      - name: Уведомить в Telegram
+        if: always() && !inputs.dry-run
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          [ -n "$TOKEN" ] || exit 0
+          if [ "${{ job.status }}" = "success" ]; then
+            TEXT="🚀 <b>${{ steps.cfg.outputs.app }}</b> — выкачено ${{ steps.ver.outputs.version }}"
+          else
+            TEXT="💥 <b>${{ steps.cfg.outputs.app }}</b> — выкатка провалена (${{ steps.ver.outputs.version }})%0A${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          fi
+          curl -s -X POST "https://api.telegram.org/bot$TOKEN/sendMessage" \
+            -d chat_id="$CHAT" -d parse_mode=HTML -d disable_web_page_preview=true \
+            --data-urlencode "text=$TEXT" >/dev/null
+
+      - name: Убрать ключ
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
