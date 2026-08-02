@@ -106,9 +106,22 @@ else
 "
     done
 
+    confd_cmds=""
+    confd_dir="$(cd "$(dirname "$0")/../nginx/conf.d" 2>/dev/null && pwd || true)"
+    if [[ -n "$confd_dir" ]]; then
+        for c in "$confd_dir"/*.conf; do
+            [[ -f "$c" ]] || continue
+            c_b64="$(base64 -w0 "$c" 2>/dev/null || base64 "$c" | tr -d '
+')"
+            confd_cmds="${confd_cmds}echo '${c_b64}' | base64 -d > /etc/nginx/conf.d/$(basename "$c")
+"
+        done
+    fi
+
     if docker run --rm -i --entrypoint sh "nginx:${NGINX_VERSION}-alpine" -s <<SCRIPT
 set -e
-mkdir -p /etc/nginx/sites-enabled /etc/nginx/snippets
+mkdir -p /etc/nginx/sites-enabled /etc/nginx/snippets /etc/nginx/conf.d
+$confd_cmds
 $snippet_cmds
 # Файлы, которые certbot кладёт на боевой хост. На раннере их нет, и без
 # заглушек nginx падает по причине, не связанной с проверяемым конфигом.
@@ -132,6 +145,9 @@ events {}
 http {
     include /etc/nginx/mime.types;
     default_type application/octet-stream;
+    # conf.d идёт ПЕРЕД сайтами: log_format допустим только на уровне http,
+    # и конфиг сайта, ссылающийся на формат, обязан видеть его объявление.
+    include /etc/nginx/conf.d/*.conf;
     include /etc/nginx/sites-enabled/*.conf;
 }
 WRAP
