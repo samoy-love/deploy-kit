@@ -24,12 +24,16 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # bin/* глобом, а не перечислением. Перечисление уже разъехалось:
+      # bin/install-server не попадал ни сюда, ни в shellcheck — то есть
+      # единственный скрипт, который кладёт код НА СЕРВЕР, был и единственным
+      # непроверяемым. Глоб не забывает про новый файл.
       # Синтаксис отдельно от статического анализа: разобранный скрипт с
       # претензиями shellcheck починить можно, а неразбираемый — уже нет.
       - name: Синтаксис
         run: |
           fail=0
-          for f in server/*.sh ci/*.sh bin/deploy bin/dk; do
+          for f in server/*.sh ci/*.sh bin/*; do
             [ -f "$f" ] || continue
             if bash -n "$f"; then
               echo "ok   $f"
@@ -44,7 +48,7 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
           # -x: скрипты подключают lib.sh, без этого проверка слепа к общим функциям.
-          shellcheck -x -S warning server/*.sh ci/*.sh bin/deploy bin/dk
+          shellcheck -x -S warning server/*.sh ci/*.sh bin/*
 
       # Справка — часть контракта: dk help читают чаще, чем исходники.
       - name: dk help не падает
