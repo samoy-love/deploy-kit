@@ -27,7 +27,7 @@ jobs:
     name: Коммиты без упоминаний ИИ
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -55,7 +55,7 @@ jobs:
     name: Скрипты
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # bin/* глобом, а не перечислением. Перечисление уже разъехалось:
       # bin/install-server не попадал ни сюда, ни в shellcheck — то есть
@@ -91,7 +91,7 @@ jobs:
     name: Конфигурация nginx
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # Настоящий nginx той же версии, что на проде: 1.24 не знает директивы
       # `http2 on`, и конфиг, валидный для свежего nginx, там просто не встанет.
@@ -114,7 +114,7 @@ jobs:
     name: Переиспользуемые workflow
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: actionlint
         run: |
