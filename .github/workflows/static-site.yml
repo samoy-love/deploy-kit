@@ -55,10 +55,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Без кеша npm — он требует lock-файла.
+      #
+      # У статических сайтов здесь нет package.json вовсе: линтеры зовутся через
+      # `npx --yes`. setup-node в этом случае не предупреждает, а ПАДАЕТ
+      # («Dependencies lock file is not found»), и выкатка обрывается ещё до
+      # гейтов, то есть до того, как хоть что-то проверено. Кешировать при этом
+      # нечего: npx тянет по одному пакету на прогон.
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
-          cache: npm
 
       - name: Прочитать описание цели
         id: cfg
