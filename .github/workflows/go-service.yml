@@ -91,7 +91,6 @@ jobs:
         run: ${{ inputs.gates }}
 
       - name: Собрать артефакт
-        working-directory: ${{ inputs.workdir }}
         env:
           DEPLOY_VERSION: ${{ steps.ver.outputs.version }}
           DEPLOY_GOARCH: ${{ steps.cfg.outputs.goarch }}
@@ -110,7 +109,6 @@ jobs:
           echo "Собрано:"; ls -la "$D"
 
       - name: Отметить версию
-        working-directory: ${{ inputs.workdir }}
         run: |
           D="${{ steps.cfg.outputs.artifact_dir }}"
           # Кладём в public/, если он есть: тогда версия доступна по /version.json
@@ -121,7 +119,6 @@ jobs:
             "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$T/version.json"
 
       - name: Упаковать
-        working-directory: ${{ inputs.workdir }}
         run: |
           tar -czf /tmp/artifact.tar.gz -C "${{ steps.cfg.outputs.artifact_dir }}" .
           echo "Размер: $(du -h /tmp/artifact.tar.gz | cut -f1)"
