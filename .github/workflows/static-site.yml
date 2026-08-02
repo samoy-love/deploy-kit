@@ -91,11 +91,19 @@ jobs:
       - name: Полный регресс
         run: ${{ inputs.gates }}
 
+      # Ранняя проверка конфига — приятно, но не обязательна: тот же конфиг
+      # на сервере проходит nginx-apply.sh, который сверяет версию nginx,
+      # запускает nginx -t и откатывается при провале. Поэтому если скрипт
+      # недоступен (deploy-kit приватный — raw.githubusercontent отдаёт 404),
+      # шаг предупреждает и пропускается, а не валит выкатку.
       - name: Проверить конфиг nginx
         if: inputs.nginx-conf != ''
         run: |
-          curl -fsSL https://raw.githubusercontent.com/tr0llex/deploy-kit/main/ci/nginx-check.sh -o /tmp/nginx-check.sh
-          bash /tmp/nginx-check.sh "${{ inputs.nginx-conf }}"
+          if curl -fsSL https://raw.githubusercontent.com/tr0llex/deploy-kit/main/ci/nginx-check.sh -o /tmp/nginx-check.sh 2>/dev/null; then
+            bash /tmp/nginx-check.sh "${{ inputs.nginx-conf }}"
+          else
+            echo "::warning::ci/nginx-check.sh недоступен (deploy-kit приватный) — ранняя проверка конфига пропущена, защита остаётся на стороне сервера"
+          fi
 
       - name: Отметить версию в сборке
         run: |
