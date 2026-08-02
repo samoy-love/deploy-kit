@@ -1,0 +1,189 @@
+name: static-site
+
+# Переиспользуемый пайплайн для статических сайтов.
+#
+# В проекте остаётся вызов на десяток строк:
+#
+#   jobs:
+#     deploy:
+#       uses: tr0llex/deploy-kit/.github/workflows/static-site.yml@main
+#       with:
+#         config: .deploy-kit/prod.env
+#         gates: npm ci && npm run test:coverage && npm run build
+#       secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      config:
+        description: 'Файл описания цели в репозитории проекта'
+        required: true
+        type: string
+      gates:
+        description: 'Полный регресс: линт, типы, тесты, сборка. Красный = выкатки нет'
+        required: true
+        type: string
+      node-version:
+        required: false
+        type: number
+        default: 22
+      nginx-conf:
+        description: 'Конфиг nginx проекта, если его надо обновлять'
+        required: false
+        type: string
+        default: ''
+      dry-run:
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  # Очередь на репозиторий. Очередь на весь хост держит flock в release.sh:
+  # сюда она дотянуться не может, потому что репозиториев несколько.
+  group: deploy-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+
+      - name: Прочитать описание цели
+        id: cfg
+        run: |
+          [ -f "${{ inputs.config }}" ] || { echo "::error::нет файла ${{ inputs.config }}"; exit 1; }
+          # Значения уезжают в outputs, а не в глобальный env: так видно,
+          # что именно пайплайн взял из описания.
+          set -a; . "${{ inputs.config }}"; set +a
+          for v in APP ARTIFACT_DIR ROOT; do
+            [ -n "${!v}" ] || { echo "::error::в описании не задано $v"; exit 1; }
+          done
+          {
+            echo "app=$APP"
+            echo "artifact_dir=$ARTIFACT_DIR"
+            echo "root=$ROOT"
+            echo "owner=${OWNER:-}"
+            echo "health=${HEALTH:-}"
+            echo "version_url=${VERSION_URL:-}"
+            echo "neighbours=${NEIGHBOURS:-}"
+            echo "nginx_reload=${NGINX_RELOAD:-0}"
+            echo "nginx_dest=${NGINX_DEST:-}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Версия релиза
+        id: ver
+        run: |
+          # Тег — если стоим ровно на нём; иначе дата и короткий коммит.
+          V="$(git describe --tags --exact-match 2>/dev/null || true)"
+          [ -n "$V" ] || V="$(date -u '+%Y%m%d-%H%M%S')-$(git rev-parse --short HEAD)"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Версия: $V"
+
+      # Полный регресс. Красный регресс = выкатки нет: main обязан быть
+      # всегда выкатываемым, раз каждый мерж уезжает на прод.
+      - name: Полный регресс
+        run: ${{ inputs.gates }}
+
+      - name: Проверить конфиг nginx
+        if: inputs.nginx-conf != ''
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/tr0llex/deploy-kit/main/ci/nginx-check.sh -o /tmp/nginx-check.sh
+          bash /tmp/nginx-check.sh "${{ inputs.nginx-conf }}"
+
+      - name: Отметить версию в сборке
+        run: |
+          printf '{"version":"%s","commit":"%s","builtAt":"%s"}\n' \
+            "${{ steps.ver.outputs.version }}" "$(git rev-parse --short HEAD)" \
+            "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "${{ steps.cfg.outputs.artifact_dir }}/version.json"
+
+      - name: Упаковать
+        run: |
+          tar -czf /tmp/artifact.tar.gz -C "${{ steps.cfg.outputs.artifact_dir }}" .
+          echo "Размер: $(du -h /tmp/artifact.tar.gz | cut -f1)"
+          sha256sum /tmp/artifact.tar.gz
+
+      - name: Настроить SSH
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST_KEY: ${{ secrets.SSH_HOST_KEY }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # Ключ хоста из секрета, а не ssh-keyscan: keyscan доверяет первому
+          # ответу и молча принимает подмену.
+          if [ -n "$HOST_KEY" ]; then
+            printf '%s\n' "$HOST_KEY" > ~/.ssh/known_hosts
+          else
+            echo "::warning::SSH_HOST_KEY не задан — ключ хоста принимается доверием к первому ответу"
+            ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          fi
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Предусловия на хосте
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy_key "$USER@$HOST" \
+            "sudo /opt/deploy-kit/preflight.sh --app '${{ steps.cfg.outputs.app }}' --root '${{ steps.cfg.outputs.root }}'"
+
+      - name: Обновить конфиг nginx
+        if: inputs.nginx-conf != '' && steps.cfg.outputs.nginx_dest != ''
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          scp -i ~/.ssh/deploy_key "${{ inputs.nginx-conf }}" "$USER@$HOST:/tmp/site.conf"
+          ssh -i ~/.ssh/deploy_key "$USER@$HOST" \
+            "sudo /opt/deploy-kit/nginx-apply.sh --app '${{ steps.cfg.outputs.app }}' \
+               --conf /tmp/site.conf --dest '${{ steps.cfg.outputs.nginx_dest }}' --enable \
+               ${{ inputs.dry-run && '--dry-run' || '' }}"
+
+      - name: Выкатить
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          REMOTE=/tmp/${{ steps.cfg.outputs.app }}-${{ steps.ver.outputs.version }}.tar.gz
+          scp -i ~/.ssh/deploy_key /tmp/artifact.tar.gz "$USER@$HOST:$REMOTE"
+
+          ARGS="--app '${{ steps.cfg.outputs.app }}' --version '${{ steps.ver.outputs.version }}'"
+          ARGS="$ARGS --archive '$REMOTE' --root '${{ steps.cfg.outputs.root }}'"
+          [ -n "${{ steps.cfg.outputs.owner }}" ]       && ARGS="$ARGS --owner '${{ steps.cfg.outputs.owner }}'"
+          [ -n "${{ steps.cfg.outputs.health }}" ]      && ARGS="$ARGS --health '${{ steps.cfg.outputs.health }}'"
+          [ -n "${{ steps.cfg.outputs.version_url }}" ] && ARGS="$ARGS --version-url '${{ steps.cfg.outputs.version_url }}'"
+          [ -n "${{ steps.cfg.outputs.neighbours }}" ]  && ARGS="$ARGS --neighbours '${{ steps.cfg.outputs.neighbours }}'"
+          [ "${{ steps.cfg.outputs.nginx_reload }}" = "1" ] && ARGS="$ARGS --nginx-reload"
+          ${{ inputs.dry-run && 'ARGS="$ARGS --dry-run"' || 'true' }}
+
+          ssh -i ~/.ssh/deploy_key "$USER@$HOST" "sudo /opt/deploy-kit/release.sh $ARGS"
+          ssh -i ~/.ssh/deploy_key "$USER@$HOST" "rm -f '$REMOTE'" || true
+
+      - name: Уведомить в Telegram
+        if: always() && !inputs.dry-run
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          [ -n "$TOKEN" ] || exit 0
+          if [ "${{ job.status }}" = "success" ]; then
+            TEXT="🚀 <b>${{ steps.cfg.outputs.app }}</b> — выкачено ${{ steps.ver.outputs.version }}"
+          else
+            TEXT="💥 <b>${{ steps.cfg.outputs.app }}</b> — выкатка провалена (${{ steps.ver.outputs.version }})%0A${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          fi
+          curl -s -X POST "https://api.telegram.org/bot$TOKEN/sendMessage" \
+            -d chat_id="$CHAT" -d parse_mode=HTML -d disable_web_page_preview=true \
+            --data-urlencode "text=$TEXT" >/dev/null
+
+      - name: Убрать ключ
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
