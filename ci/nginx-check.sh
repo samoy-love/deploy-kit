@@ -83,13 +83,33 @@ else
     # ложный зелёный, который опаснее отсутствия проверки.
     conf_b64="$(base64 -w0 "$CONF" 2>/dev/null || base64 "$CONF" | tr -d '\n')"
 
+    # Сниппеты берём НАСТОЯЩИЕ, из этого же репозитория: раньше здесь лежали
+    # две пустышки с прибитыми именами, и конфиг, подключающий любой другой
+    # сниппет, падал не по своей вине. Заодно так проверяется и содержимое
+    # сниппетов, а не только то, что файл существует.
+    snippets_dir="$(cd "$(dirname "$0")/../nginx/snippets" 2>/dev/null && pwd || true)"
+    snippet_cmds=""
+    if [[ -n "$snippets_dir" ]]; then
+        for s in "$snippets_dir"/*.conf; do
+            [[ -f "$s" ]] || continue
+            s_b64="$(base64 -w0 "$s" 2>/dev/null || base64 "$s" | tr -d '\n')"
+            snippet_cmds="${snippet_cmds}echo '${s_b64}' | base64 -d > /etc/nginx/snippets/$(basename "$s")
+"
+        done
+    fi
+    # Сниппеты, которых в репозитории нет (например, чужие или ещё не
+    # написанные), заменяем пустышками — иначе проверка упрётся не в тот конфиг,
+    # который проверяет.
+    for want in $(grep -hoE 'include[[:space:]]+/etc/nginx/snippets/[^;]+' "$CONF" | awk '{print $2}' | xargs -r -n1 basename | sort -u); do
+        [[ -f "$snippets_dir/$want" ]] && continue
+        snippet_cmds="${snippet_cmds}: > /etc/nginx/snippets/$want
+"
+    done
+
     if docker run --rm -i --entrypoint sh "nginx:${NGINX_VERSION}-alpine" -s <<SCRIPT
 set -e
 mkdir -p /etc/nginx/sites-enabled /etc/nginx/snippets
-# Общие сниппеты на раннере недоступны — подкладываем пустышки, чтобы
-# include не падал по причине, не связанной с проверяемым конфигом.
-: > /etc/nginx/snippets/samoy-security-headers.conf
-: > /etc/nginx/snippets/cache.conf
+$snippet_cmds
 # Файлы, которые certbot кладёт на боевой хост. На раннере их нет, и без
 # заглушек nginx падает по причине, не связанной с проверяемым конфигом.
 # openssl нужен и здесь (dhparam), и ниже (сертификаты) — ставим один раз
