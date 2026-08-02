@@ -154,7 +154,7 @@ jobs:
           USER: ${{ secrets.DEPLOY_USER }}
         run: |
           ssh -i ~/.ssh/deploy_key "$USER@$HOST" \
-            "sudo /opt/deploy-kit/preflight.sh --app '${{ steps.cfg.outputs.app }}' --root '${{ steps.cfg.outputs.root }}'                ${{ steps.cfg.outputs.owner && format('--owner ''{0}''', steps.cfg.outputs.owner) || '' }}"
+            "sudo /opt/deploy-kit/preflight.sh --app '${{ steps.cfg.outputs.app }}' --root '${{ steps.cfg.outputs.root }}'"
 
       - name: Обновить конфиг nginx
         if: inputs.nginx-conf != '' && steps.cfg.outputs.nginx_dest != ''

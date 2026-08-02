@@ -160,7 +160,7 @@ jobs:
           ssh -i ~/.ssh/deploy_key "$USER@$HOST" \
             "sudo /opt/deploy-kit/preflight.sh --app '${{ steps.cfg.outputs.app }}' \
                --root '${{ steps.cfg.outputs.root }}' \
-               ${{ steps.cfg.outputs.owner && format('--owner ''{0}''', steps.cfg.outputs.owner) || '' }}                ${{ steps.cfg.outputs.unit && format('--units ''{0}''', steps.cfg.outputs.unit) || '' }}"
+               ${{ steps.cfg.outputs.unit && format('--units ''{0}''', steps.cfg.outputs.unit) || '' }}"
 
       - name: Выкатить
         env:
