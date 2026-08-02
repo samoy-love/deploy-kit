@@ -89,6 +89,13 @@ if (( DRY )); then
     echo "каталог:        $NEW_DIR"
     echo "текущий релиз:  $([[ -L $CURRENT ]] && basename "$(readlink -f "$CURRENT")" || echo 'нет')"
     [[ -n "$UNIT" ]]       && echo "перезапуск:     $UNIT"
+    # Каталог релиза ещё не распакован — смотрим прямо в архив.
+    UNITS_IN_ARCHIVE="$(tar -tzf "$ARCHIVE" 2>/dev/null | grep -E '^([.]/)?systemd/.' | xargs -r -n1 basename | tr '\n' ' ' || true)"
+    if [[ -n "${UNITS_IN_ARCHIVE// /}" ]]; then
+        echo "юниты:          из релиза ($UNITS_IN_ARCHIVE)"
+    else
+        echo "юниты:          в артефакте нет, ставятся руками"
+    fi
     (( NGINX_RELOAD ))     && echo "nginx:          reload после переключения"
     [[ -n "$HEALTH" ]]     && echo "healthcheck:    $HEALTH"
     [[ -n "$VERSION_URL" ]] && echo "сверка версии:  $VERSION_URL"
@@ -147,11 +154,64 @@ rollback() {
         die "откатываться некуда: это была первая выкатка $APP. Релиз оставлен как есть, разбирайтесь вручную"
     fi
     switch_symlink "$CURRENT" "$PREV_TARGET"
+    # Юниты откатываем вместе с релизом: иначе на старом коде остался бы
+    # ExecStart от нового, и откат чинил бы половину проблемы.
+    install_units "$PREV_TARGET" || true
     [[ -n "$UNIT" ]] && systemctl restart "$UNIT" || true
     (( NGINX_RELOAD )) && { nginx -t >/dev/null 2>&1 && systemctl reload nginx; } || true
     warn "откат выполнен: current -> $(basename "$PREV_TARGET")"
     die "выкатка $APP $VERSION провалена и откачена"
 }
+
+# --- 2.5. Юниты systemd из релиза ----------------------------------------
+#
+# Юнит лежит в git, а на сервер попадал руками, один раз, при установке.
+# Дальше файл в репозитории и файл на машине жили каждый своей жизнью:
+# правка ExecStart уезжала в main, зелёный деплой рапортовал об успехе, а
+# служба продолжала запускаться со старыми аргументами. Так статус-страница
+# полдня читала конфиг годовой давности при свежем релизе на диске.
+#
+# Ставим только то, что реально изменилось: daemon-reload на каждую выкатку
+# ради неизменившегося файла — лишний повод дёрнуть systemd.
+install_units() {
+    local dir="$1/systemd" name changed=0
+    [[ -d "$dir" ]] || return 0
+
+    local installed=()
+    shopt -s nullglob
+    local f
+    for f in "$dir"/*.service "$dir"/*.timer "$dir"/*.socket; do
+        name="$(basename "$f")"
+        if cmp -s "$f" "/etc/systemd/system/$name"; then
+            continue
+        fi
+        # Явное || return: функция вызывается через `|| rollback`, а в таком
+        # контексте set -e внутри неё не действует, и провал install молча
+        # прошёл бы дальше.
+        install -m 0644 "$f" "/etc/systemd/system/$name" || return 1
+        log "юнит обновлён: $name"
+        installed+=("$name")
+        changed=1
+    done
+    shopt -u nullglob
+
+    (( changed )) || return 0
+    systemctl daemon-reload
+
+    # Автозапуск включаем сами: юнит, приехавший впервые, иначе не переживёт
+    # перезагрузку сервера, и об этом узнают в худший момент. Таймеры и
+    # сокеты запускаем сразу — их, в отличие от службы, ниже никто не
+    # перезапустит.
+    for name in "${installed[@]}"; do
+        case "$name" in
+            *.timer|*.socket) systemctl enable --now "$name" || warn "не включён: $name" ;;
+            *)                systemctl enable "$name" >/dev/null 2>&1 || true ;;
+        esac
+    done
+    ok "юниты systemd применены"
+}
+
+install_units "$NEW_DIR" || rollback
 
 # --- 3. Применить ---------------------------------------------------------
 if (( NGINX_RELOAD )); then
