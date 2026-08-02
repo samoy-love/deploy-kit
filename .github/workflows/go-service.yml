@@ -79,8 +79,9 @@ jobs:
       - name: Версия релиза
         id: ver
         run: |
+          # Префикс release- отличает выкатку из пайплайна от ручной (manual-).
           V="$(git describe --tags --exact-match 2>/dev/null || true)"
-          [ -n "$V" ] || V="$(date -u '+%Y%m%d-%H%M%S')-$(git rev-parse --short HEAD)"
+          [ -n "$V" ] || V="release-$(date -u '+%Y%m%d-%H%M%S')-$(git rev-parse --short HEAD)"
           echo "version=$V" >> "$GITHUB_OUTPUT"
 
       # Регресс идёт под архитектурой раннера — тесты должны выполняться,

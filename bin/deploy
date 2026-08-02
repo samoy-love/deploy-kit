@@ -61,15 +61,19 @@ KEEP="${KEEP:-5}"
 SSH=(ssh -i "$DEPLOY_KEY" -o StrictHostKeyChecking=yes "$DEPLOY_USER@$DEPLOY_HOST")
 SCP=(scp -i "$DEPLOY_KEY" -o StrictHostKeyChecking=yes)
 
-# Версия: тег, если стоим ровно на нём, иначе дата и короткий коммит.
-# Локальная выкатка из грязного дерева помечается суффиксом -dirty —
-# чтобы на статус-странице было видно, что уехало не из репозитория.
+# Версия. Ровно две метки, и по имени релиза всегда видно, откуда он взялся:
+#
+#   release-<дата>-<коммит>   уехало из пайплайна
+#   manual-<дата>-<коммит>    выкачено руками с машины разработчика
+#
+# Состояние рабочего дерева в имя не попадает: локальная выкатка почти всегда
+# идёт из дерева с правками, и метка «dirty» не несла информации — а вот
+# «manual» отличает её от релиза сразу и однозначно.
+KIND="${DEPLOY_KIND:-manual}"          # пайплайн выставляет DEPLOY_KIND=release
 if git rev-parse --git-dir >/dev/null 2>&1; then
-    VERSION="$(git describe --tags --exact-match 2>/dev/null || true)"
-    [[ -z "$VERSION" ]] && VERSION="$(date -u '+%Y%m%d-%H%M%S')-$(git rev-parse --short HEAD)"
-    [[ -n "$(git status --porcelain)" ]] && VERSION="${VERSION}-dirty"
+    VERSION="$KIND-$(date -u '+%Y%m%d-%H%M%S')-$(git rev-parse --short HEAD)"
 else
-    VERSION="$(date -u '+%Y%m%d-%H%M%S')-local"
+    VERSION="$KIND-$(date -u '+%Y%m%d-%H%M%S')"
 fi
 
 echo "приложение:  $APP"

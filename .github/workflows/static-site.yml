@@ -80,9 +80,11 @@ jobs:
       - name: Версия релиза
         id: ver
         run: |
-          # Тег — если стоим ровно на нём; иначе дата и короткий коммит.
+          # Всё, что уехало отсюда, помечается release-: по имени релиза на
+          # сервере сразу видно, пайплайн его положил или человек руками.
+          # Тег, если стоим ровно на нём, — иначе дата и короткий коммит.
           V="$(git describe --tags --exact-match 2>/dev/null || true)"
-          [ -n "$V" ] || V="$(date -u '+%Y%m%d-%H%M%S')-$(git rev-parse --short HEAD)"
+          [ -n "$V" ] || V="release-$(date -u '+%Y%m%d-%H%M%S')-$(git rev-parse --short HEAD)"
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "Версия: $V"
 
