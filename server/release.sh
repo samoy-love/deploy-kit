@@ -98,6 +98,11 @@ if (( DRY )); then
     fi
     (( NGINX_RELOAD ))     && echo "nginx:          reload после переключения"
     [[ -n "$HEALTH" ]]     && echo "healthcheck:    $HEALTH"
+    if tar -tzf "$ARCHIVE" 2>/dev/null | grep -qE '^([.]/)?verify$'; then
+        echo "своя проверка:  verify из артефакта"
+    else
+        echo "своя проверка:  нет"
+    fi
     [[ -n "$VERSION_URL" ]] && echo "сверка версии:  $VERSION_URL"
     [[ -n "$NEIGHBOURS" ]] && echo "соседи:         $NEIGHBOURS"
     echo "хранить релизов: $KEEP"
@@ -246,6 +251,28 @@ else
         ok "current указывает на $VERSION"
     else
         warn "current указывает на $LIVE_NOW, а выкатывали $VERSION"
+        rollback
+    fi
+fi
+
+# Своя проверка цели.
+#
+# HTTP-healthcheck отвечает не на все вопросы: телеграм-бот, например, никуда
+# не слушает — он сам ходит в Telegram длинным опросом, и «жив ли он» проверить
+# запросом с сервера невозможно. Молчащий бот при этом неотличим от рабочего,
+# пока что-нибудь не упадёт, — а выяснять это в момент аварии поздно.
+#
+# Соглашение, а не флаг: цель кладёт в артефакт исполняемый verify, и выкатка
+# его запускает. Флаг пришлось бы протаскивать строкой с кавычками через
+# описание цели, workflow и ssh — ровно так же, как BUILD_CMD, который по этой
+# причине через outputs и не передаётся.
+if [[ -f "$NEW_DIR/verify" ]]; then
+    chmod +x "$NEW_DIR/verify"
+    log "своя проверка цели: verify"
+    if timeout 120 "$NEW_DIR/verify"; then
+        ok "проверка цели прошла"
+    else
+        warn "проверка цели не прошла (или не уложилась в 120 с)"
         rollback
     fi
 fi
