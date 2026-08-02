@@ -23,6 +23,8 @@
 #   ARTIFACT_DIR=dist              что паковать
 #   ROOT=/var/www/samoy.love       корень с releases/ и current
 #   OWNER=ubuntu:ubuntu            владелец файлов релиза
+#   NGINX_CONF=nginx/sites/metro.conf   конфиг сайта — путь ВНУТРИ deploy-kit
+#   NGINX_DEST=/etc/nginx/sites-available/metro.conf   куда его ставить
 #   NGINX_RELOAD=1                 перезагрузить nginx после переключения
 #   UNIT=                          systemd-юнит для сервисов
 #   HEALTH=https://samoy.love/
@@ -33,6 +35,11 @@
 #   DEPLOY_HOST, DEPLOY_USER, DEPLOY_KEY
 
 set -Eeuo pipefail
+
+# Корень deploy-kit. Отсюда берутся конфиги nginx: они живут ТОЛЬКО здесь, в
+# репозиториях проектов копий нет (иначе два источника правды разъезжаются, и
+# какой из них на проде — выясняется по факту).
+KIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'; DIM=$'\033[2m'; RST=$'\033[0m'
 [[ -t 1 ]] || { RED=''; GRN=''; YEL=''; DIM=''; RST=''; }
@@ -244,6 +251,44 @@ fi
 log "проверяю предусловия на сервере"
 "${SSH[@]}" "sudo /opt/deploy-kit/preflight.sh --app '$APP' --root '$ROOT' ${UNIT:+--units '$UNIT'}" \
     || die "предусловия не выполнены — выкатка не начата"
+
+# --- конфиг nginx ---------------------------------------------------------
+#
+# Идёт ПОСЛЕ предусловий и ДО выкатки — тем же порядком, что и в пайплайне.
+# Порядок не косметика: конфиг применяется с проверкой и откатом (nginx-apply.sh
+# снимает бэкап, гоняет nginx -t и возвращает прежний файл при провале), а
+# выкатка после него переключает симлинк уже на проверенном сервере.
+#
+# Источник — сам deploy-kit: NGINX_CONF задаёт путь ВНУТРИ этого репозитория.
+# Раньше конфиг мог приехать только из репозитория проекта (входом nginx-conf у
+# reusable workflow), а правило гласит обратное — конфигурация nginx живёт
+# только здесь. В итоге не работал ни один путь: локальная выкатка про nginx не
+# знала вовсе, а в пайплайне проекты вход не передавали, потому что передавать
+# было нечего. NGINX_DEST при этом в описаниях целей стоял и выглядел рабочим.
+if [[ -n "${NGINX_CONF:-}" ]]; then
+    [[ -n "${NGINX_DEST:-}" ]] || die "в описании есть NGINX_CONF, но нет NGINX_DEST — некуда ставить конфиг"
+
+    # Путь обязан быть относительным и не выходить из deploy-kit: файл ставится
+    # на сервер под sudo, и произвольная точка ФС здесь недопустима.
+    case "$NGINX_CONF" in
+        /*|*..*) die "NGINX_CONF должен быть относительным путём внутри deploy-kit, получено: $NGINX_CONF" ;;
+    esac
+    NGINX_SRC="$KIT_DIR/$NGINX_CONF"
+    [[ -f "$NGINX_SRC" ]] || die "нет конфига nginx: $NGINX_SRC"
+
+    NGINX_REMOTE="/tmp/${APP}-site.conf"
+    NGINX_ARGS=(--app "$APP" --conf "$NGINX_REMOTE" --dest "$NGINX_DEST" --enable)
+    (( DRY )) && NGINX_ARGS+=(--dry-run)
+
+    log "конфиг nginx: $NGINX_CONF → $NGINX_DEST"
+    "${SCP[@]}" "$NGINX_SRC" "$DEPLOY_USER@$DEPLOY_HOST:$NGINX_REMOTE"
+    # Провал здесь — это отказ выкатки целиком: nginx-apply.sh уже вернул файл
+    # как было, и катить статику под конфигом, который не встал, незачем.
+    "${SSH[@]}" "sudo /opt/deploy-kit/nginx-apply.sh $(printf '%q ' "${NGINX_ARGS[@]}")" \
+        || die "конфиг nginx не встал — прежний файл возвращён, выкатка $APP не начата"
+    "${SSH[@]}" "rm -f '$NGINX_REMOTE'" || true
+    ok "конфиг nginx применён"
+fi
 
 # --- выкатка --------------------------------------------------------------
 REMOTE_ARCHIVE="/tmp/${APP}-${VERSION}.tar.gz"

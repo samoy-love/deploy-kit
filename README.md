@@ -189,12 +189,21 @@ BUILD_CMD="npm ci && npm run build"
 ARTIFACT_DIR=dist                   # что паковать
 ROOT=/var/www/samoy.love            # тут лежат releases/ и current
 OWNER=ubuntu:ubuntu
+NGINX_CONF=nginx/sites/samoy.love.conf   # конфиг сайта — путь внутри deploy-kit
+NGINX_DEST=/etc/nginx/sites-available/samoy.love.conf   # куда его ставить
 NGINX_RELOAD=1                      # статика: reload nginx после переключения
 UNIT=                               # сервисы: systemd-юнит вместо reload
 HEALTH=https://samoy.love/
 VERSION_URL=https://samoy.love/version.json
 NEIGHBOURS=metro.samoy.love,snakes.samoy.love
 ```
+
+Конфиг nginx описывается парой `NGINX_CONF` + `NGINX_DEST`, и `NGINX_CONF` —
+путь **внутри deploy-kit**: конфигурация nginx живёт в одном репозитории, копий
+в проектах нет. Файл везут оба пути выкатки — и `dk deploy`, и пайплайн, —
+после чего его применяет `nginx-apply.sh` на сервере: бэкап, `nginx -t`, откат
+при провале. Одна половина пары без другой — ошибка описания, а не «настроено
+наполовину»: молча пропущенный шаг выглядит как выкаченный конфиг.
 
 Этот же файл читает `dk deploy`. Цели, которые не раздают `version.json`,
 ставят `WRITE_VERSION_FILE=0` — тогда шлюз и проверка после выкатки читают имя

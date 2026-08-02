@@ -195,12 +195,22 @@ BUILD_CMD="npm ci && npm run build"
 ARTIFACT_DIR=dist                   # what gets packed
 ROOT=/var/www/samoy.love            # holds releases/ and current
 OWNER=ubuntu:ubuntu
+NGINX_CONF=nginx/sites/samoy.love.conf   # site config — a path inside deploy-kit
+NGINX_DEST=/etc/nginx/sites-available/samoy.love.conf   # where to install it
 NGINX_RELOAD=1                      # static: reload nginx after the switch
 UNIT=                               # services: systemd unit to restart instead
 HEALTH=https://samoy.love/
 VERSION_URL=https://samoy.love/version.json
 NEIGHBOURS=metro.samoy.love,snakes.samoy.love
 ```
+
+The nginx config is described by the pair `NGINX_CONF` + `NGINX_DEST`, where
+`NGINX_CONF` is a path **inside deploy-kit**: nginx configuration lives in one
+repository, projects keep no copies. Both deployment paths ship it — `dk deploy`
+and the pipeline alike — and `nginx-apply.sh` installs it on the server with a
+backup, `nginx -t` and a rollback on failure. Half of the pair without the other
+is a broken description rather than a partial setup: a silently skipped step
+looks exactly like an applied config.
 
 The same file drives `dk deploy`. Targets that do not serve `version.json` set
 `WRITE_VERSION_FILE=0`; the gate and the post-deploy check then read the release
