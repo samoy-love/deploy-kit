@@ -48,19 +48,29 @@ done
 # есть вне репозитория — ровно то состояние, из которого конфиги сюда и
 # вытаскивали.
 #
-# Разрешён каталог, а не свобода: nginx.conf, sites-enabled напрямую и чужие
-# snippets по-прежнему недоступны, файл по-прежнему один за запуск.
+# snippets добавился по той же причине, что и conf.d: общие фрагменты живут в
+# репозитории (nginx/snippets), а увезти их на сервер было нечем. Сайты их
+# подключают, значит без них конфиг сайта не проходит nginx -t — и выкатка
+# сайта откатывалась по причине, которой в самом сайте нет.
+#
+# Разрешён каталог, а не свобода: nginx.conf и sites-enabled напрямую
+# по-прежнему недоступны, файл по-прежнему один за запуск. В snippets вдобавок
+# ограничен ПРЕФИКС имени: там же лежат fastcgi-php.conf и snakeoil.conf от
+# дистрибутива, и перезаписать их выкаткой нельзя.
 case "$DEST" in
     /etc/nginx/sites-available/*) ;;
     /etc/nginx/conf.d/*.conf) ;;
-    *) die "конфиг можно ставить только в /etc/nginx/sites-available или /etc/nginx/conf.d, получено: $DEST" ;;
+    /etc/nginx/snippets/samoylove-*.conf) ;;
+    /etc/nginx/snippets/*) die "в snippets можно ставить только samoylove-*.conf — остальное там принадлежит дистрибутиву, получено: $DEST" ;;
+    *) die "конфиг можно ставить только в /etc/nginx/sites-available, /etc/nginx/conf.d или /etc/nginx/snippets, получено: $DEST" ;;
 esac
 
-# Симлинк в sites-enabled осмыслен только для sites-available: содержимое
-# conf.d nginx.conf подключает целиком, включать там нечего.
+# Симлинк в sites-enabled осмыслен только для sites-available: conf.d nginx.conf
+# подключает целиком, а сниппет подключается include'ом из конкретного сайта.
 if (( ENABLE )); then
     case "$DEST" in
-        /etc/nginx/conf.d/*) die "--enable неприменим к /etc/nginx/conf.d: каталог подключён из nginx.conf целиком" ;;
+        /etc/nginx/conf.d/*)  die "--enable неприменим к /etc/nginx/conf.d: каталог подключён из nginx.conf целиком" ;;
+        /etc/nginx/snippets/*) die "--enable неприменим к /etc/nginx/snippets: сниппет подключается include'ом из конфига сайта" ;;
     esac
 fi
 
