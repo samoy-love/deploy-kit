@@ -40,11 +40,29 @@ done
 [[ -f "$CONF" ]] || die "нет файла конфига: $CONF"
 [[ -n "$DEST" ]] || die "нужен --dest"
 
-# Граница ответственности: пишем только в sites-available и только один файл.
+# Граница ответственности: пишем один файл и только в два каталога.
+#
+# conf.d появился здесь ради log_format: эта директива допустима ИСКЛЮЧИТЕЛЬНО
+# на уровне http, а всё, что лежит в sites-available, — это server-блоки. Без
+# файла в conf.d формат журнала пришлось бы держать руками в nginx.conf, то
+# есть вне репозитория — ровно то состояние, из которого конфиги сюда и
+# вытаскивали.
+#
+# Разрешён каталог, а не свобода: nginx.conf, sites-enabled напрямую и чужие
+# snippets по-прежнему недоступны, файл по-прежнему один за запуск.
 case "$DEST" in
     /etc/nginx/sites-available/*) ;;
-    *) die "конфиг проекта можно ставить только в /etc/nginx/sites-available, получено: $DEST" ;;
+    /etc/nginx/conf.d/*.conf) ;;
+    *) die "конфиг можно ставить только в /etc/nginx/sites-available или /etc/nginx/conf.d, получено: $DEST" ;;
 esac
+
+# Симлинк в sites-enabled осмыслен только для sites-available: содержимое
+# conf.d nginx.conf подключает целиком, включать там нечего.
+if (( ENABLE )); then
+    case "$DEST" in
+        /etc/nginx/conf.d/*) die "--enable неприменим к /etc/nginx/conf.d: каталог подключён из nginx.conf целиком" ;;
+    esac
+fi
 
 # --- 0. Совместимость с версией nginx на этом хосте -----------------------
 ver=$(nginx -v 2>&1 | sed -n 's/.*nginx\/\([0-9.]*\).*/\1/p')
