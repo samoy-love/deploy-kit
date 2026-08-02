@@ -71,7 +71,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: ${{ inputs.workdir }}/${{ inputs.go-version-file }}
           cache-dependency-path: ${{ inputs.workdir }}/go.sum
