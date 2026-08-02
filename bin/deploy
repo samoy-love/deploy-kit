@@ -6,6 +6,11 @@
 #   deploy --config .deploy-kit/prod.env --no-build # выкатить уже собранное
 #   deploy --config .deploy-kit/prod.env --allow-unpushed  # коммита нет на remote
 #   deploy --config … --allow-same-version          # осознанный повтор версии
+#   deploy --config … --verbose                     # показать вывод сборки
+#
+# По умолчанию вывод сборщика уезжает в файл и печатается только при провале:
+# он занимал девять десятых вывода при выкатке всех целей. --verbose (или
+# DK_VERBOSE=1) возвращает его на экран.
 #
 # Принципиально: CI и этот скрипт читают ОДИН и тот же файл-описание проекта
 # и вызывают ОДИН и тот же release.sh на сервере. Иначе «локально катится, а
@@ -52,6 +57,7 @@ warn() { printf '%s!%s %s\n' "$YEL" "$RST" "$*" >&2; }
 die()  { printf '%s✗%s %s\n' "$RED" "$RST" "$*" >&2; exit 1; }
 
 CONFIG=""; DRY=0; BUILD=1; ALLOW_SAME=0; ALLOW_UNPUSHED=0
+VERBOSE="${DK_VERBOSE:-0}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --config)   CONFIG="$2"; shift 2 ;;
@@ -59,6 +65,7 @@ while [[ $# -gt 0 ]]; do
         --no-build) BUILD=0; shift ;;
         --allow-same-version) ALLOW_SAME=1; shift ;;
         --allow-unpushed) ALLOW_UNPUSHED=1; shift ;;
+        -v|--verbose) VERBOSE=1; shift ;;
         -h|--help)  sed -n '2,30p' "$0"; exit 0 ;;
         *) die "неизвестный аргумент: $1" ;;
     esac
@@ -78,7 +85,12 @@ DEPLOY_KEY="${DEPLOY_KEY:-$HOME/.ssh/id_ed25519}"
 KEEP="${KEEP:-5}"
 
 SSH=(ssh -i "$DEPLOY_KEY" -o StrictHostKeyChecking=yes "$DEPLOY_USER@$DEPLOY_HOST")
+# -q гасит полосу прогресса. Она рисуется в терминал управляющими символами и
+# в общем выводе выкатки одиннадцати целей оставляет одиннадцать обрывков
+# «100% 2976KB 2.9MB/s» — сведений, которые ни на что не влияют. Размер
+# артефакта печатается отдельной строкой на шаге упаковки.
 SCP=(scp -i "$DEPLOY_KEY" -o StrictHostKeyChecking=yes)
+(( VERBOSE )) || SCP+=(-q)
 
 # Версия. Ровно две метки, и по имени релиза всегда видно, откуда он взялся:
 #
@@ -111,15 +123,50 @@ echo "сервер:      $DEPLOY_USER@$DEPLOY_HOST"
 echo "каталог:     $ROOT"
 
 # --- сборка ---------------------------------------------------------------
+#
+# Вывод сборщика по умолчанию НЕ печатается, а уезжает в файл.
+#
+# Он занимал девять десятых всего вывода `dk deploy --all`: npm печатает про
+# фандинг и уязвимости, vite — таблицу размеров бандла, astro — список
+# сгенерированных маршрутов. При одной цели это терпимо, при одиннадцати
+# результат выкатки тонет в чужих логах, и «что именно произошло» приходится
+# искать глазами.
+#
+# При провале лог печатается целиком: там причина, и прятать её нельзя.
+# Целиком же его показывает --verbose (или DK_VERBOSE=1) — когда сборку
+# отлаживают, а не просто катят.
 if (( BUILD )) && [[ -n "${BUILD_CMD:-}" ]]; then
-    log "сборка: $BUILD_CMD"
     if (( DRY )); then
-        echo "  (dry-run: пропускаю)"
+        log "сборка пропущена (dry-run): $BUILD_CMD"
     else
+        BUILD_LOG="$(mktemp -t "${APP}-build-XXXXXX.log")"
+        log "сборка"
         # Сборке доступны версия и архитектура — тем же способом, что и в CI,
         # чтобы команда в описании цели была одна на оба пути.
-        DEPLOY_VERSION="$VERSION" DEPLOY_GOARCH="${GOARCH:-}" \
-            bash -c "$BUILD_CMD" || die "сборка провалилась"
+        # `|| rc=$?`, а не `rc=$?` отдельной строкой: при set -e падение сборки
+        # убивает скрипт ДО присваивания, и тогда ни лог, ни причина до
+        # человека не доезжают — остаётся молчаливый выход с чужим кодом.
+        # Проверено: без этого провал сборки печатал только «сборка».
+        rc=0
+        if (( VERBOSE )); then
+            # pipefail уже включён, поэтому статус пайплайна — статус сборки,
+            # а не tee.
+            DEPLOY_VERSION="$VERSION" DEPLOY_GOARCH="${GOARCH:-}" \
+                bash -c "$BUILD_CMD" 2>&1 | tee "$BUILD_LOG" || rc=$?
+        else
+            DEPLOY_VERSION="$VERSION" DEPLOY_GOARCH="${GOARCH:-}" \
+                bash -c "$BUILD_CMD" > "$BUILD_LOG" 2>&1 || rc=$?
+        fi
+        if (( rc != 0 )); then
+            warn "сборка провалилась: $BUILD_CMD"
+            # Лог целиком, а не хвост: причина падения сборки часто в первой
+            # строке (не тот node, нет зависимости), а хвост показывает лишь
+            # «команда завершилась с кодом 1».
+            cat "$BUILD_LOG" >&2
+            rm -f "$BUILD_LOG"
+            die "выкатка $APP не начата"
+        fi
+        rm -f "$BUILD_LOG"
         ok "собрано"
     fi
 fi
@@ -142,9 +189,50 @@ if [[ "${WRITE_VERSION_FILE:-1}" == "1" ]] && ! (( DRY )); then
     ok "version.json записан в ${VDIR#$PWD/}"
 fi
 
+# --- уведомление ----------------------------------------------------------
+#
+# Локальная выкатка молчала в чат, а выкатка из CI — писала. Разница была не
+# задумана, а просто не сделана: шаг уведомления живёт в workflow, и до
+# bin/deploy его никто не донёс. Практическое следствие неприятное: сообщения
+# в чате перестают быть летописью прода. «Ничего не приходило» начинает
+# означать «либо ничего не катилось, либо катилось руками» — а это разные вещи.
+#
+# Токен и чат берутся из dk.conf, как хост и ключ. Нет токена — молчим, и это
+# не ошибка: у выкатки нет причины требовать настроенный чат.
+notify() {
+    local status="$1"
+    local token="${TELEGRAM_BOT_TOKEN:-}" chat="${TELEGRAM_CHAT_ID:-}"
+    [[ -n "$token" && -n "$chat" ]] || return 0
+    (( DRY )) && return 0
+
+    # Правила те же, что в CI (см. шаг «Уведомить в Telegram»): об успехе можно
+    # молчать, о провале — нельзя. Невыкаченное, о котором не сказали, выглядит
+    # как выкаченное.
+    case "${NOTIFY:-all}:$status" in
+        never:*)      return 0 ;;
+        fail:success) return 0 ;;
+    esac
+
+    local text
+    if [[ "$status" == success ]]; then
+        text=$(printf '🚀 <b>%s</b> выкачен\n<code>%s</code>\nвыкатка с машины разработчика' "$APP" "$VERSION")
+        [[ -n "${HEALTH:-}" ]] && text=$(printf '%s\n<a href="%s">открыть</a>' "$text" "$HEALTH")
+    else
+        text=$(printf '💥 <b>%s</b> — выкатка провалена\n<code>%s</code>\nвыкатка с машины разработчика' "$APP" "$VERSION")
+    fi
+
+    curl -s -X POST "https://api.telegram.org/bot$token/sendMessage" \
+        -d chat_id="$chat" -d parse_mode=HTML -d disable_web_page_preview=true \
+        --data-urlencode "text=$text" >/dev/null || true
+}
+
+# Итог считается провалом, пока не доказано обратное: die выходит из любого
+# места скрипта, и перечислять все его точки в уведомлении пришлось бы руками.
+DEPLOY_STATUS=failure
+
 # --- упаковка -------------------------------------------------------------
 TARBALL="$(mktemp -t "${APP}-XXXXXX").tar.gz"
-trap 'rm -f "$TARBALL"' EXIT
+trap 'rm -f "$TARBALL"; notify "$DEPLOY_STATUS"' EXIT
 if (( DRY )); then
     log "упаковка пропущена (dry-run)"
 else
@@ -193,4 +281,5 @@ fi
 
 (( DRY )) || "${SSH[@]}" "rm -f '$REMOTE_ARCHIVE'"
 
+DEPLOY_STATUS=success
 ok "готово: $APP $VERSION"
