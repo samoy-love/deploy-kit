@@ -73,6 +73,7 @@ jobs:
             echo "owner=${OWNER:-}"
             echo "unit=${UNIT:-}"
             echo "health=${HEALTH:-}"
+            echo "notify=${NOTIFY:-all}"
             echo "version_url=${VERSION_URL:-}"
             echo "neighbours=${NEIGHBOURS:-}"
             echo "goarch=${GOARCH:-arm64}"
@@ -207,12 +208,31 @@ jobs:
         env:
           TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          APP: ${{ steps.cfg.outputs.app }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          HEALTH: ${{ steps.cfg.outputs.health }}
+          NOTIFY: ${{ steps.cfg.outputs.notify }}
+          STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           [ -n "$TOKEN" ] || exit 0
-          if [ "${{ job.status }}" = "success" ]; then
-            TEXT="🚀 <b>${{ steps.cfg.outputs.app }}</b> — выкачено ${{ steps.ver.outputs.version }}"
+          # Об успехе можно молчать: у проекта бывает свой канал новостей о
+          # релизах, и тогда сообщение отсюда — второй голос об одном событии.
+          # О провале молчать нельзя: невыкаченное, о котором не сказали,
+          # выглядит как выкаченное.
+          case "${NOTIFY:-all}:$STATUS" in
+            never:*)      exit 0 ;;
+            fail:success) exit 0 ;;
+          esac
+          if [ "$STATUS" = "success" ]; then
+            TEXT=$(printf '🚀 <b>%s</b> выкачен\n<code>%s</code>' "$APP" "$VERSION")
+            # Ссылка на сам компонент, если он отвечает по HTTP: увидел
+            # «выкачен» — хочешь открыть и посмотреть.
+            [ -n "$HEALTH" ] && TEXT=$(printf '%s\n<a href="%s">открыть</a>' "$TEXT" "$HEALTH")
           else
-            TEXT="💥 <b>${{ steps.cfg.outputs.app }}</b> — выкатка провалена (${{ steps.ver.outputs.version }})%0A${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            # Перенос строки настоящий: литерал %0A внутри текста ещё раз
+            # кодируется в --data-urlencode и приезжает в чат как есть.
+            TEXT=$(printf '💥 <b>%s</b> — выкатка провалена\n<code>%s</code>\nПрод не тронут: релиз переключается последним шагом.\n<a href="%s">разобраться</a>' "$APP" "$VERSION" "$RUN_URL")
           fi
           curl -s -X POST "https://api.telegram.org/bot$TOKEN/sendMessage" \
             -d chat_id="$CHAT" -d parse_mode=HTML -d disable_web_page_preview=true \
