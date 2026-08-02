@@ -53,7 +53,7 @@ jobs:
           # Без префикса release-: эта версия уезжает в NSIS как AppVersion,
           # а он ждёт числовой вид. Установщик и не кладётся релизом на сервер.
           V="$(git describe --tags --exact-match 2>/dev/null || true)"
-          [ -n "$V" ] || V="0.0.0-$(date -u '+%Y%m%d')-$(git rev-parse --short HEAD)"
+          [ -n "$V" ] || V="0.0.0-$(TZ=Europe/Moscow date '+%Y%m%d')-$(git rev-parse --short HEAD)"
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "Версия: $V"
 
