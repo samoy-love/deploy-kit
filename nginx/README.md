@@ -16,9 +16,9 @@ conf.d/     то, что обязано жить на уровне http (фор�
 
 ## Журнал для метрик
 
-`conf.d/samoy-log-metrics.conf` объявляет формат `samoy_metrics`, а
+`conf.d/samoylove-log-metrics.conf` объявляет формат `samoylove_metrics`, а
 `samoy.love.conf` и `metro.conf` пишут им второй журнал
-`/var/log/nginx/samoy_metrics.log`. Его читает экспортёр из `samoy-monitoring`.
+`/var/log/nginx/samoylove_metrics.log`. Его читает экспортёр из `metrics.samoy.love`.
 
 В формате намеренно **нет** IP, User-Agent, Referer и строки запроса: только
 домен, метод, путь, код, объём и время ответа. Строку, которой не существует,
