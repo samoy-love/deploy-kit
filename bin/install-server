@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Обновление серверной части deploy-kit — скриптов в /opt/deploy-kit.
+#
+#   install-server            показать расхождения, ничего не менять
+#   install-server --apply    выложить скрипты из репозитория на сервер
+#
+# ЗАЧЕМ ОТДЕЛЬНАЯ КОМАНДА. Всё остальное хозяйство катится пайплайном, а сами
+# скрипты пайплайна до сих пор клали руками. Расхождение репозитория и сервера
+# здесь — худший случай из возможных: на сервере работает не тот код, который
+# все читают и правят, и понять это можно только по симптомам.
+#
+# Хост и ключ — из окружения или из ~/.config/deploy-kit/dk.conf:
+#   DEPLOY_HOST, DEPLOY_USER, DEPLOY_KEY
+
+set -Eeuo pipefail
+
+RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'; BLD=$'\033[1m'; DIM=$'\033[2m'; RST=$'\033[0m'
+[[ -t 1 ]] || { RED=''; GRN=''; YEL=''; BLD=''; DIM=''; RST=''; }
+ok()   { printf '%s✓%s %s\n' "$GRN" "$RST" "$*"; }
+warn() { printf '%s!%s %s\n' "$YEL" "$RST" "$*" >&2; }
+die()  { printf '%s✗%s %s\n' "$RED" "$RST" "$*" >&2; exit 1; }
+
+KIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEST="${DEPLOY_KIT_DIR:-/opt/deploy-kit}"
+
+CONF="${DK_CONF:-$HOME/.config/deploy-kit/dk.conf}"
+if [[ -f "$CONF" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "$CONF"
+    set +a
+fi
+
+APPLY=0
+[[ "${1:-}" == "--apply" ]] && APPLY=1
+[[ -n "${1:-}" && "${1:-}" != "--apply" ]] && die "неизвестный аргумент: $1 (см. шапку файла)"
+
+DEPLOY_HOST="${DEPLOY_HOST:?нет DEPLOY_HOST}"
+DEPLOY_USER="${DEPLOY_USER:-ubuntu}"
+DEPLOY_KEY="${DEPLOY_KEY:-$HOME/.ssh/id_ed25519}"
+SSH=(ssh -i "$DEPLOY_KEY" -o StrictHostKeyChecking=yes "$DEPLOY_USER@$DEPLOY_HOST")
+SCP=(scp -i "$DEPLOY_KEY" -o StrictHostKeyChecking=yes)
+
+FILES=(lib.sh release.sh rollback.sh preflight.sh nginx-apply.sh)
+
+# Сверяем без учёта концов строк: на Windows рабочая копия хранится с CRLF,
+# и различие в них — не различие в коде.
+printf '\n%sЧто на сервере %s:%s\n' "$BLD" "$DEST" "$RST"
+drift=()
+for f in "${FILES[@]}"; do
+    lh="$(tr -d '\r' < "$KIT_DIR/server/$f" | sha256sum | cut -c1-12)"
+    rh="$("${SSH[@]}" "sudo tr -d '\r' < '$DEST/$f' 2>/dev/null | sha256sum | cut -c1-12" || true)"
+    if [[ -z "$rh" || "$rh" == *"d41d8cd98f00"* ]]; then
+        printf '  %-16s %sнет на сервере%s\n' "$f" "$YEL" "$RST"; drift+=("$f")
+    elif [[ "$lh" == "$rh" ]]; then
+        printf '  %-16s %sсовпадает%s\n' "$f" "$DIM" "$RST"
+    else
+        printf '  %-16s %sразошлось%s (сервер %s, репозиторий %s)\n' "$f" "$RED" "$RST" "$rh" "$lh"
+        drift+=("$f")
+    fi
+done
+
+if (( ${#drift[@]} == 0 )); then
+    echo; ok "сервер и репозиторий совпадают"
+    exit 0
+fi
+
+if ! (( APPLY )); then
+    echo
+    warn "расходится: ${drift[*]}"
+    printf '%sВыложить: install-server --apply%s\n' "$DIM" "$RST"
+    exit 1
+fi
+
+# Заливаем во временный каталог и проверяем синтаксис ИМЕННО там: сломанный
+# release.sh на месте означает, что выкатиться и откатиться уже нечем.
+STAGE="/tmp/deploy-kit-stage-$$"
+"${SSH[@]}" "rm -rf '$STAGE' && mkdir -p '$STAGE'"
+for f in "${FILES[@]}"; do
+    "${SCP[@]}" "$KIT_DIR/server/$f" "$DEPLOY_USER@$DEPLOY_HOST:$STAGE/$f"
+done
+
+"${SSH[@]}" "set -e
+    for f in ${FILES[*]}; do
+        sed -i 's/\r$//' '$STAGE'/\$f
+        bash -n '$STAGE'/\$f || { echo \"\$f не разбирается — ничего не меняю\"; exit 1; }
+    done
+    sudo install -o root -g root -m 0755 '$STAGE'/*.sh '$DEST'/
+    rm -rf '$STAGE'" || die "выкладка не прошла — на сервере осталась прежняя версия"
+
+ok "выложено: ${drift[*]}"
+
+# Проверяем, что выложенное действительно работает: битый скрипт обнаруживается
+# сейчас, а не в момент, когда им попытаются что-то выкатить.
+"${SSH[@]}" "sudo $DEST/release.sh --help >/dev/null 2>&1 || sudo bash -n $DEST/release.sh" \
+    && ok "release.sh на сервере исполняем"
