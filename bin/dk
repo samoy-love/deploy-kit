@@ -80,23 +80,67 @@ cmd_list() {
 
 cmd_status() {
     say "Что сейчас на проде"
-    local urls=(
-        "samoy.love|https://samoy.love"
-        "metro|https://metro.samoy.love"
-        "snakes|https://snakes.samoy.love"
-        "launcher|https://launcher.samoy.love"
-        "status|https://status.samoy.love"
-    )
-    printf '%s  %-12s %-6s %s%s\n' "$DIM" "САЙТ" "КОД" "ВЕРСИЯ" "$RST"
-    local e name url code ver
-    for e in "${urls[@]}"; do
-        name="${e%%|*}"; url="${e#*|}"
-        code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url/" || echo '---')"
-        ver="$(curl -s --max-time 8 "$url/version.json" 2>/dev/null \
-               | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
-        local c="$GRN"; [[ "$code" == "200" ]] || c="$RED"
-        printf '  %-12s %s%-6s%s %s\n' "$name" "$c" "$code" "$RST" "${ver:-—}"
-    done
+
+    # Список строится из тех же описаний целей, что и выкатка. Раньше здесь был
+    # захардкоженный список пяти сайтов: он не знал ни про бота, ни про морду
+    # админки, ни про мониторинг — то есть отвечал не на тот вопрос.
+    printf '%s  %-20s %-5s %-9s %s%s\n' "$DIM" "ЦЕЛЬ" "КОД" "ЮНИТ" "ВЕРСИЯ" "$RST"
+
+    # Состояние юнитов забираем одним заходом: отдельный ssh на каждый сервис
+    # превращает быструю команду в десять рукопожатий.
+    local units=""
+    if [[ -n "${DEPLOY_HOST:-}" && -n "${DEPLOY_KEY:-}" ]]; then
+        units="$(ssh -i "$DEPLOY_KEY" -o ConnectTimeout=8 -o BatchMode=yes \
+            "${DEPLOY_USER:-ubuntu}@$DEPLOY_HOST" \
+            "systemctl list-units --type=service --type=timer --all --no-legend --plain" 2>/dev/null || true)"
+    fi
+
+    local line
+    while IFS= read -r line; do
+        # Каждая цель считается в подоболочке: отсутствие HEALTH или UNIT —
+        # нормальное состояние (у бота нет адреса, у сайта нет юнита) и не
+        # должно обрывать всю команду через set -e.
+        (
+            set +e
+            app="${line%%|*}"; rest="${line#*|}"; file="${rest#*|}"
+            val() { grep -m1 "^$1=" "$file" 2>/dev/null | cut -d= -f2- | tr -d "\"'"; }
+
+            health="$(val HEALTH)"; vurl="$(val VERSION_URL)"; unit="$(val UNIT)"
+
+            probe="$health"; [[ -z "$probe" ]] && probe="${vurl%/version.json}"
+            code="—"
+            [[ -n "$probe" ]] && code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$probe" 2>/dev/null || echo '---')"
+
+            ver="—"
+            if [[ -n "$vurl" ]]; then
+                v="$(curl -s --max-time 8 "$vurl" 2>/dev/null | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+                [[ -n "$v" ]] && ver="$v"
+            fi
+
+            ustate="—"
+            timer=""
+            if [[ -n "$unit" ]]; then
+                ustate="$(awk -v u="$unit" '$1==u {print $4; exit}' <<<"$units")"
+                [[ -z "$ustate" ]] && ustate="нет"
+                # Сервис, который запускает таймер, между запусками мёртв по
+                # устройству. Красить его красным — учить не верить команде.
+                timer="$(awk -v u="${unit%.service}.timer" '$1==u {print $1; exit}' <<<"$units")"
+                [[ -n "$timer" && "$ustate" == "dead" ]] && ustate="по таймеру"
+            fi
+
+            c="$GRN"
+            [[ "$code" == "200" || "$code" == "—" ]] || c="$RED"
+            [[ -n "$unit" && "$ustate" != "running" && "$ustate" != "по таймеру" ]] && c="$RED"
+            printf '  %-20s %s%-5s%s %-9s %s\n' "$app" "$c" "$code" "$RST" "$ustate" "$ver"
+        )
+    done < <(discover)
+
+    # Мониторинг живёт контейнерами, а не релизом, поэтому целью выкатки не
+    # является — но молчащие графики надо замечать, а не принимать за норму.
+    local mcode mc
+    mcode="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://metrics.samoy.love/ 2>/dev/null || echo '---')"
+    mc="$GRN"; [[ "$mcode" == "401" ]] || mc="$RED"
+    printf '  %-20s %s%-5s%s %-9s %s\n' "metrics" "$mc" "$mcode" "$RST" "—" "Grafana за паролем"
 }
 
 resolve() {

@@ -87,7 +87,7 @@ jobs:
         run: |
           # Префикс release- отличает выкатку из пайплайна от ручной (manual-).
           V="$(git describe --tags --exact-match 2>/dev/null || true)"
-          [ -n "$V" ] || V="release-$(date -u '+%Y%m%d-%H%M%S')-$(git rev-parse --short HEAD)"
+          [ -n "$V" ] || V="release-$(TZ=Europe/Moscow date '+%Y%m%d-%H%M%S')-$(git rev-parse --short HEAD)"
           echo "version=$V" >> "$GITHUB_OUTPUT"
 
       # Регресс идёт под архитектурой раннера — тесты должны выполняться,
@@ -126,7 +126,7 @@ jobs:
           T="$D/public"; [ -d "$T" ] || T="$D"
           printf '{"version":"%s","commit":"%s","builtAt":"%s"}\n' \
             "${{ steps.ver.outputs.version }}" "$(git rev-parse --short HEAD)" \
-            "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$T/version.json"
+            "$(TZ=Europe/Moscow date '+%Y-%m-%dT%H:%M:%S+03:00')" > "$T/version.json"
 
       - name: Упаковать
         run: |

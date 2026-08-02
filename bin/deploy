@@ -31,7 +31,7 @@ set -Eeuo pipefail
 
 RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'; DIM=$'\033[2m'; RST=$'\033[0m'
 [[ -t 1 ]] || { RED=''; GRN=''; YEL=''; DIM=''; RST=''; }
-log()  { printf '%s[%s]%s %s\n' "$DIM" "$(date -u '+%H:%M:%S')" "$RST" "$*"; }
+log()  { printf '%s[%s]%s %s\n' "$DIM" "$(TZ=Europe/Moscow date '+%H:%M:%S')" "$RST" "$*"; }
 ok()   { printf '%s✓%s %s\n' "$GRN" "$RST" "$*"; }
 warn() { printf '%s!%s %s\n' "$YEL" "$RST" "$*" >&2; }
 die()  { printf '%s✗%s %s\n' "$RED" "$RST" "$*" >&2; exit 1; }
@@ -75,7 +75,7 @@ SCP=(scp -i "$DEPLOY_KEY" -o StrictHostKeyChecking=yes)
 # «manual» отличает её от релиза сразу и однозначно.
 KIND="${DEPLOY_KIND:-manual}"          # пайплайн выставляет DEPLOY_KIND=release
 if git rev-parse --git-dir >/dev/null 2>&1; then
-    VERSION="$KIND-$(date -u '+%Y%m%d-%H%M%S')-$(git rev-parse --short HEAD)"
+    VERSION="$KIND-$(TZ=Europe/Moscow date '+%Y%m%d-%H%M%S')-$(git rev-parse --short HEAD)"
 
     # Коммит обязан существовать где-то, кроме этой машины. Иначе по релизу на
     # сервере нельзя узнать, какой код там работает: на проде Snakes так и
@@ -87,7 +87,7 @@ if git rev-parse --git-dir >/dev/null 2>&1; then
    Запушьте ветку либо, если это осознанно, добавьте --allow-unpushed"
     fi
 else
-    VERSION="$KIND-$(date -u '+%Y%m%d-%H%M%S')"
+    VERSION="$KIND-$(TZ=Europe/Moscow date '+%Y%m%d-%H%M%S')"
 fi
 
 echo "приложение:  $APP"
@@ -123,7 +123,7 @@ if [[ "${WRITE_VERSION_FILE:-1}" == "1" ]] && ! (( DRY )); then
     VDIR="$ARTIFACT_DIR"; [[ -d "$ARTIFACT_DIR/public" ]] && VDIR="$ARTIFACT_DIR/public"
     printf '{"version":"%s","commit":"%s","builtAt":"%s"}\n' \
         "$VERSION" "$(git rev-parse --short HEAD 2>/dev/null || echo local)" \
-        "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$VDIR/version.json"
+        "$(TZ=Europe/Moscow date '+%Y-%m-%dT%H:%M:%S+03:00')" > "$VDIR/version.json"
     ok "version.json записан в ${VDIR#$PWD/}"
 fi
 
