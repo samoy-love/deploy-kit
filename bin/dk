@@ -29,8 +29,12 @@ PROJECTS_ROOT="${DK_ROOT:-$(dirname "$KIT_DIR")}"
 # поэтому в CI ничего лишнего не читается.
 CONF="${DK_CONF:-$HOME/.config/deploy-kit/dk.conf}"
 # Путь к конфигу известен только в рантайме.
-# shellcheck disable=SC1090
-[[ -f "$CONF" ]] && { set -a; . "$CONF"; set +a; }
+if [[ -f "$CONF" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "$CONF"
+    set +a
+fi
 
 # ------------------------------------------------------------------ поиск целей
 #
@@ -162,8 +166,10 @@ cmd_rollback() {
     IFS='|' read -r app dir file <<<"$e"
 
     # Файл описания выбирает пользователь — путь известен только в рантайме.
+    set -a
     # shellcheck disable=SC1090
-    set -a; . "$file"; set +a
+    . "$file"
+    set +a
     local host="${DEPLOY_HOST:?не задан DEPLOY_HOST}" user="${DEPLOY_USER:-ubuntu}"
     local key="${DEPLOY_KEY:-$HOME/.ssh/id_ed25519}"
 
