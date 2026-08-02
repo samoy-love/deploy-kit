@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+# dk — одна команда для выкатки всего хозяйства samoy.love.
+#
+# Цели обнаруживаются сами: каждый файл .deploy-kit/*.env в соседних
+# репозиториях — это цель. Ничего регистрировать вручную не нужно.
+#
+#   dk                      что сейчас на проде
+#   dk list                 все цели
+#   dk deploy               все цели текущего проекта
+#   dk deploy snakes        конкретная цель
+#   dk deploy --all         вообще всё
+#   dk deploy --dry-run     показать план, ничего не менять
+#   dk rollback snakes      откатить на предыдущий релиз
+#   dk help                 подробности
+
+set -Eeuo pipefail
+
+RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'; BLD=$'\033[1m'; DIM=$'\033[2m'; RST=$'\033[0m'
+[[ -t 1 ]] || { RED=''; GRN=''; YEL=''; BLD=''; DIM=''; RST=''; }
+say()  { printf '\n%s▸ %s%s\n' "$BLD" "$*" "$RST"; }
+ok()   { printf '%s✓%s %s\n' "$GRN" "$RST" "$*"; }
+warn() { printf '%s!%s %s\n' "$YEL" "$RST" "$*" >&2; }
+die()  { printf '%s✗%s %s\n' "$RED" "$RST" "$*" >&2; exit 1; }
+
+KIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECTS_ROOT="${DK_ROOT:-$(dirname "$KIT_DIR")}"
+
+# Настройки доступа. Файл необязателен: переменные окружения имеют приоритет,
+# поэтому в CI ничего лишнего не читается.
+CONF="${DK_CONF:-$HOME/.config/deploy-kit/dk.conf}"
+[[ -f "$CONF" ]] && { set -a; . "$CONF"; set +a; }
+
+# ------------------------------------------------------------------ поиск целей
+#
+# Возвращает строки вида: <имя цели>|<каталог проекта>|<файл описания>
+discover() {
+    local d f app
+    for d in "$PROJECTS_ROOT"/*/; do
+        [[ -d "$d/.deploy-kit" ]] || continue
+        for f in "$d/.deploy-kit"/*.env; do
+            [[ -f "$f" ]] || continue
+            app="$(grep -m1 '^APP=' "$f" | cut -d= -f2- | tr -d '"'"'"'')"
+            [[ -n "$app" ]] || continue
+            printf '%s|%s|%s\n' "$app" "${d%/}" "$f"
+        done
+    done
+}
+
+# Цели проекта, в котором стоим (если стоим).
+current_project() {
+    local d="$PWD"
+    while [[ "$d" != "/" && "$d" != "." ]]; do
+        [[ -d "$d/.deploy-kit" ]] && { echo "$d"; return 0; }
+        d="$(dirname "$d")"
+    done
+    return 1
+}
+
+# ------------------------------------------------------------------ команды
+
+cmd_list() {
+    say "Цели выкатки"
+    local cur=""; cur="$(current_project 2>/dev/null || true)"
+    printf '%s  %-18s %-26s %s%s\n' "$DIM" "ЦЕЛЬ" "ПРОЕКТ" "ОПИСАНИЕ" "$RST"
+    discover | while IFS='|' read -r app dir file; do
+        local mark="  "
+        [[ -n "$cur" && "$dir" == "$cur" ]] && mark="${GRN}▸ ${RST}"
+        printf '%s%-18s %-24s %s
+' "$mark" "$app" "$(basename "$dir")" ".deploy-kit/$(basename "$file")"
+    done
+    echo
+    printf '%sСтрелка — цели проекта, в котором вы сейчас.%s\n' "$DIM" "$RST"
+}
+
+cmd_status() {
+    say "Что сейчас на проде"
+    local urls=(
+        "samoy.love|https://samoy.love"
+        "metro|https://metro.samoy.love"
+        "snakes|https://snakes.samoy.love"
+        "launcher|https://launcher.samoy.love"
+        "status|https://status.samoy.love"
+    )
+    printf '%s  %-12s %-6s %s%s\n' "$DIM" "САЙТ" "КОД" "ВЕРСИЯ" "$RST"
+    local e name url code ver
+    for e in "${urls[@]}"; do
+        name="${e%%|*}"; url="${e#*|}"
+        code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url/" || echo '---')"
+        ver="$(curl -s --max-time 8 "$url/version.json" 2>/dev/null \
+               | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+        local c="$GRN"; [[ "$code" == "200" ]] || c="$RED"
+        printf '  %-12s %s%-6s%s %s\n' "$name" "$c" "$code" "$RST" "${ver:-—}"
+    done
+}
+
+resolve() {
+    # По имени цели находит её описание. Имя должно быть уникальным —
+    # иначе непонятно, что именно катить, и лучше сказать об этом вслух.
+    local want="$1" hits
+    hits="$(discover | awk -F'|' -v w="$want" '$1==w')"
+    [[ -z "$hits" ]] && die "нет цели «$want». Посмотрите: dk list"
+    [[ "$(wc -l <<<"$hits")" -gt 1 ]] && die "цель «$want» встречается в нескольких проектах"
+    echo "$hits"
+}
+
+cmd_deploy() {
+    local all=0 dry=() targets=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --all)     all=1; shift ;;
+            --dry-run) dry=(--dry-run); shift ;;
+            -*)        die "неизвестный флаг: $1" ;;
+            *)         targets+=("$1"); shift ;;
+        esac
+    done
+
+    local list=()
+    if (( all )); then
+        mapfile -t list < <(discover)
+    elif (( ${#targets[@]} )); then
+        local t
+        for t in "${targets[@]}"; do list+=("$(resolve "$t")"); done
+    else
+        # Без аргументов — цели проекта, в котором стоим.
+        local cur; cur="$(current_project)" \
+            || die "вы не внутри проекта. Укажите цель или используйте --all (dk list)"
+        mapfile -t list < <(discover | awk -F'|' -v d="$cur" '$2==d')
+        (( ${#list[@]} )) || die "в $(basename "$cur") нет целей выкатки"
+    fi
+
+    printf '\n%sБудет выкачено:%s\n' "$BLD" "$RST"
+    local e; for e in "${list[@]}"; do printf '  • %s\n' "${e%%|*}"; done
+
+    local failed=() done_=()
+    for e in "${list[@]}"; do
+        IFS='|' read -r app dir file <<<"$e"
+        say "$app"
+        if (cd "$dir" && "$KIT_DIR/bin/deploy" --config "$file" "${dry[@]}" < /dev/null); then
+            done_+=("$app")
+        else
+            failed+=("$app")
+            warn "$app: выкатка не прошла"
+        fi
+    done
+
+    say "Итог"
+    (( ${#done_[@]} ))  && ok "успешно: ${done_[*]}"
+    if (( ${#failed[@]} )); then
+        die "провалено: ${failed[*]}"
+    fi
+}
+
+cmd_rollback() {
+    local target="${1:-}"; shift || true
+    [[ -n "$target" ]] || die "укажите цель: dk rollback <цель> [--list] [--to <версия>]"
+    local e; e="$(resolve "$target")"
+    IFS='|' read -r app dir file <<<"$e"
+
+    set -a; . "$file"; set +a
+    local host="${DEPLOY_HOST:?не задан DEPLOY_HOST}" user="${DEPLOY_USER:-ubuntu}"
+    local key="${DEPLOY_KEY:-$HOME/.ssh/id_ed25519}"
+
+    # ROOT здесь — путь на сервере из файла описания.
+    local args=(--app "$app" --root "${ROOT:-/opt/$app}")
+    [[ -n "${UNIT:-}" ]]   && args+=(--unit "$UNIT")
+    [[ -n "${HEALTH:-}" ]] && args+=(--health "$HEALTH")
+    [[ "${NGINX_RELOAD:-0}" == "1" ]] && args+=(--nginx-reload)
+
+    ssh -i "$key" "$user@$host" \
+        "sudo /opt/deploy-kit/rollback.sh $(printf '%q ' "${args[@]}") $*"
+}
+
+cmd_help() {
+    cat <<'EOF'
+
+dk — выкатка проектов samoy.love одной командой
+
+ИСПОЛЬЗОВАНИЕ
+  dk                          что сейчас на проде (коды ответов и версии)
+  dk list                     все цели выкатки
+  dk deploy                   все цели проекта, в котором вы стоите
+  dk deploy <цель> [<цель>…]  выборочно
+  dk deploy --all             все цели всех проектов
+  dk deploy --dry-run         показать план, ничего не менять
+  dk rollback <цель>          откатить на предыдущий релиз
+  dk rollback <цель> --list   какие релизы есть на сервере
+  dk rollback <цель> --to X   откатить на конкретный релиз
+  dk help                     эта справка
+
+ПРИМЕРЫ
+  dk deploy                   стоя в MetroMap — выкатит metro
+  dk deploy snakes status-site
+  dk deploy --all --dry-run   посмотреть, что уедет, ничего не трогая
+  dk rollback snakes --list
+
+КАК ЭТО УСТРОЕНО
+  Цели обнаруживаются сами: каждый .deploy-kit/*.env в соседних репозиториях —
+  это цель. Регистрировать ничего не нужно: добавили файл — появилась цель.
+
+  Локальная выкатка идёт тем же путём, что и CI: один и тот же файл описания
+  и один и тот же release.sh на сервере. Расхождения «локально работает, в CI
+  нет» быть не может по построению.
+
+НАСТРОЙКА
+  ~/.config/deploy-kit/dk.conf (или переменные окружения):
+
+    DEPLOY_HOST=207.127.93.34
+    DEPLOY_USER=ubuntu
+    DEPLOY_KEY=/c/Users/…/server access/samoy-deploy-key
+
+  DK_ROOT — где искать проекты (по умолчанию каталог рядом с deploy-kit).
+
+EOF
+}
+
+# ------------------------------------------------------------------ разбор
+
+case "${1:-status}" in
+    ""|status)          shift || true; cmd_status ;;
+    list|ls)            shift; cmd_list ;;
+    deploy|d)           shift; cmd_deploy "$@" ;;
+    rollback|rb)        shift; cmd_rollback "$@" ;;
+    help|-h|--help)     cmd_help ;;
+    *)                  die "неизвестная команда: $1 (см. dk help)" ;;
+esac
