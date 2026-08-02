@@ -10,6 +10,8 @@ The single release pipeline behind every samoy.love project: static sites, Go
 services and a desktop installer all reach production through the same
 conveyor.
 
+<img src="docs/img/dk-list.svg" alt="dk list output: eleven deployment targets" width="100%">
+
 ## Why
 
 Every project used to reinvent deployment. Only Snakes could roll back — the
