@@ -36,7 +36,7 @@ if (( LIST )); then
         | sort -rn | cut -d' ' -f2- | while read -r d; do
             mark="  "; [[ "$d" == "$cur" ]] && mark="->"
             printf '%s %-32s %s\n' "$mark" "$(basename "$d")" \
-                "$(date -u -d "@$(stat -c %Y "$d")" '+%Y-%m-%d %H:%M UTC')"
+                "$(TZ=Europe/Moscow date -d "@$(stat -c %Y "$d")" '+%Y-%m-%d %H:%M МСК')"
         done
     exit 0
 fi

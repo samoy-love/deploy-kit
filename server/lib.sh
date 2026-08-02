@@ -7,7 +7,7 @@ set -Eeuo pipefail
 RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'; DIM=$'\033[2m'; RST=$'\033[0m'
 [[ -t 1 ]] || { RED=''; GRN=''; YEL=''; DIM=''; RST=''; }
 
-log()  { printf '%s[%s]%s %s\n' "$DIM" "$(date -u '+%H:%M:%S')" "$RST" "$*"; }
+log()  { printf '%s[%s]%s %s\n' "$DIM" "$(TZ=Europe/Moscow date '+%H:%M:%S')" "$RST" "$*"; }
 ok()   { printf '%s✓%s %s\n' "$GRN" "$RST" "$*"; }
 warn() { printf '%s!%s %s\n' "$YEL" "$RST" "$*" >&2; }
 die_code() { local c="$1"; shift; printf '%s✗%s %s\n' "$RED" "$RST" "$*" >&2; exit "$c"; }
@@ -44,7 +44,7 @@ need_cmd() { command -v "$1" >/dev/null 2>&1 || die "нет команды $1"; 
 # Свободное место в мегабайтах для указанного пути.
 free_mb() { df -Pm "$1" | awk 'NR==2 {print $4}'; }
 
-human_ts() { date -u '+%Y%m%d-%H%M%S'; }
+human_ts() { TZ=Europe/Moscow date '+%Y%m%d-%H%M%S'; }
 
 # Симлинк current -> releases/<версия>; меняется атомарно через временный
 # линк и mv -T, иначе между rm и ln есть окно, когда пути не существует.
