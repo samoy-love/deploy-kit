@@ -126,21 +126,28 @@ cmd_status() {
                 # устройству. Красить его красным — учить не верить команде.
                 timer="$(awk -v u="${unit%.service}.timer" '$1==u {print $1; exit}' <<<"$units")"
                 [[ -n "$timer" && "$ustate" == "dead" ]] && ustate="по таймеру"
+                # Юнит-обёртка (Type=oneshot + RemainAfterExit) отработал и
+                # вышел, а поднятое им — работает: у мониторинга это compose
+                # со стеком контейнеров. В колонке SUB он навсегда «exited»,
+                # и без этой ветки исправный стек красился бы красным.
+                if [[ "$ustate" == "exited" ]] \
+                   && [[ "$(awk -v u="$unit" '$1==u {print $3; exit}' <<<"$units")" == "active" ]]; then
+                    ustate="поднят"
+                fi
             fi
 
             c="$GRN"
             [[ "$code" == "200" || "$code" == "—" ]] || c="$RED"
-            [[ -n "$unit" && "$ustate" != "running" && "$ustate" != "по таймеру" ]] && c="$RED"
+            [[ -n "$unit" && "$ustate" != "running" && "$ustate" != "по таймеру" && "$ustate" != "поднят" ]] && c="$RED"
             printf '  %-20s %s%-5s%s %-9s %s\n' "$app" "$c" "$code" "$RST" "$ustate" "$ver"
         )
     done < <(discover)
 
-    # Мониторинг живёт контейнерами, а не релизом, поэтому целью выкатки не
-    # является — но молчащие графики надо замечать, а не принимать за норму.
-    local mcode mc
-    mcode="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://metrics.samoy.love/ 2>/dev/null || echo '---')"
-    mc="$GRN"; [[ "$mcode" == "401" ]] || mc="$RED"
-    printf '  %-20s %s%-5s%s %-9s %s\n' "metrics" "$mc" "$mcode" "$RST" "—" "Grafana за паролем"
+    # Мониторинг раньше стоял здесь отдельной строкой с проверкой «отвечает
+    # ли 401»: он жил контейнерами и катился руками, то есть целью выкатки не
+    # был. Теперь у него есть .deploy-kit/prod.env, и он приходит из discover
+    # наравне со всеми — со своим кодом ответа, юнитом и версией релиза.
+    # Отдельная строка означала бы, что мониторинг показан дважды.
 }
 
 resolve() {
