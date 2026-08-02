@@ -163,6 +163,8 @@ apply there and [`nginx/gzip.md`](nginx/gzip.md) for compression.
 | Two repositories never deploy at once | `flock` on `/var/lock/deploy-kit.lock`, host-wide |
 | A config valid locally but invalid on prod is rejected | `ci/nginx-check.sh` runs the real nginx 1.24 |
 | The scripts on the server match the repository | checksum comparison in `install-server`, upload only from `main` |
+| A systemd unit on the server matches the repository | `install_units`: units travel inside the artifact under `systemd/` |
+| A target that HTTP cannot check is still verified | an executable `verify` in the artifact runs after the switch, rollback on failure |
 
 The repository's own CI runs shell syntax checks separately from shellcheck (a
 parsed script with complaints can be fixed, an unparsable one cannot), validates
