@@ -1,0 +1,26 @@
+# Единый конец строки: в репозитории всегда LF, в рабочей копии — по системе.
+* text=auto eol=lf
+
+# Файлы, которые исполняются на сервере. CRLF здесь ломает шебанг:
+# ядро ищет интерпретатор «/bin/bash\r» и не находит его.
+*.sh   text eol=lf
+*.bash text eol=lf
+bin/*  text eol=lf
+
+# Windows-скрипты — наоборот.
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Бинарное не трогаем.
+*.png binary
+*.jpg binary
+*.webp binary
+*.avif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.pdf binary
+*.zip binary
+*.exe binary
+*.dll binary
