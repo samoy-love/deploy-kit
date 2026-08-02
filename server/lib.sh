@@ -184,6 +184,9 @@ compare_versions() {
 # запасной источник и единственный для целей с WRITE_VERSION_FILE=0
 # (морда админки version.json не раздаёт, и требовать его от неё бессмысленно).
 # Откуда взята версия прода — для сообщений шлюза.
+# Читается вызывающим release.sh после version_gate — shellcheck не видит
+# использования через source и считает переменную мёртвой.
+# shellcheck disable=SC2034
 LIVE_VERSION_SOURCE=""
 
 current_live_version() {

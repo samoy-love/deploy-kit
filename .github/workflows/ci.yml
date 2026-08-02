@@ -63,7 +63,7 @@ jobs:
           fail=0
           for conf in nginx/sites/*.conf; do
             echo "::group::$conf"
-            if sh ci/nginx-check.sh "$conf"; then
+            if bash ci/nginx-check.sh "$conf"; then
               echo "ok"
             else
               echo "::error file=$conf::nginx не принял конфиг"

@@ -28,6 +28,7 @@ PROJECTS_ROOT="${DK_ROOT:-$(dirname "$KIT_DIR")}"
 # Настройки доступа. Файл необязателен: переменные окружения имеют приоритет,
 # поэтому в CI ничего лишнего не читается.
 CONF="${DK_CONF:-$HOME/.config/deploy-kit/dk.conf}"
+# shellcheck source=/dev/null  # путь к конфигу известен только в рантайме
 [[ -f "$CONF" ]] && { set -a; . "$CONF"; set +a; }
 
 # ------------------------------------------------------------------ поиск целей
@@ -159,6 +160,7 @@ cmd_rollback() {
     local e; e="$(resolve "$target")"
     IFS='|' read -r app dir file <<<"$e"
 
+    # shellcheck source=/dev/null  # файл описания выбирается пользователем
     set -a; . "$file"; set +a
     local host="${DEPLOY_HOST:?не задан DEPLOY_HOST}" user="${DEPLOY_USER:-ubuntu}"
     local key="${DEPLOY_KEY:-$HOME/.ssh/id_ed25519}"
