@@ -265,7 +265,7 @@ dk — выкатка проектов samoy.love одной командой
 
     DEPLOY_HOST=207.127.93.34
     DEPLOY_USER=ubuntu
-    DEPLOY_KEY=/c/Users/…/server access/samoy-deploy-key
+    DEPLOY_KEY=/c/Users/…/server access/samoylove-deploy-key
 
   DK_ROOT — где искать проекты (по умолчанию каталог рядом с deploy-kit).
 

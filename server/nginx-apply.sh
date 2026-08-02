@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Применение nginx-конфига проекта: дифф → бэкап → установка → проверка → откат.
 #
-#   nginx-apply.sh --app samoy-love --conf /tmp/new.conf \
+#   nginx-apply.sh --app samoylove --conf /tmp/new.conf \
 #                  --dest /etc/nginx/sites-available/samoy.love.conf --enable
 #   nginx-apply.sh ... --dry-run     # только показать дифф
 #

@@ -2,4 +2,4 @@
 # Значения с пробелами обязательно в кавычках: файл читается как shell-скрипт.
 DEPLOY_HOST=207.127.93.34
 DEPLOY_USER=ubuntu
-DEPLOY_KEY="~/.ssh/samoy-deploy-key"
+DEPLOY_KEY="~/.ssh/samoylove-deploy-key"

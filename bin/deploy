@@ -13,7 +13,7 @@
 #
 # Файл-описание (.deploy-kit/prod.env в репозитории проекта):
 #
-#   APP=samoy-love                 имя приложения (каталог на сервере)
+#   APP=samoylove                  имя приложения (каталог на сервере)
 #   BUILD_CMD="npm ci && npm run build"
 #   ARTIFACT_DIR=dist              что паковать
 #   ROOT=/var/www/samoy.love       корень с releases/ и current
