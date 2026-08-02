@@ -5,20 +5,21 @@
 # непонятно, что сломалось — наш релиз или то, что лежало до него. И чтобы
 # не обнаружить нехватку места на середине копирования.
 #
-#   preflight.sh --app snakes --need-mb 500 [--units snakes.service]
+#   preflight.sh --app snakes --need-mb 500 [--units snakes.service] [--owner root:snakes]
 #
 # Код возврата: 0 — можно катить, 1 — нельзя.
 
 set -Eeuo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-APP=""; NEED_MB=300; UNITS=""; ROOT=""
+APP=""; NEED_MB=300; UNITS=""; ROOT=""; OWNER=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --app)     APP="$2"; shift 2 ;;
         --root)    ROOT="$2"; shift 2 ;;
         --need-mb) NEED_MB="$2"; shift 2 ;;
         --units)   UNITS="$2"; shift 2 ;;
+        --owner)   OWNER="$2"; shift 2 ;;
         *) die "неизвестный аргумент: $1" ;;
     esac
 done
@@ -28,6 +29,26 @@ ROOT="${ROOT:-/opt/$APP}"
 fail=0
 
 log "проверяю предусловия для $APP"
+
+# 0. Владелец релиза существует.
+#
+# Без этой проверки несуществующий пользователь всплывает уже в середине
+# выкатки — строкой «chown: invalid group» посреди распаковки. Выглядит как
+# поломка деплоя, хотя на деле сервис просто не заведён на хосте: так бывает
+# после переименования цели.
+if [[ -n "$OWNER" ]]; then
+    o_user="${OWNER%%:*}"
+    o_group="${OWNER##*:}"
+    if ! id -u "$o_user" >/dev/null 2>&1; then
+        warn "нет пользователя $o_user — заведите его на хосте (см. первичную настройку проекта)"
+        fail=1
+    elif ! getent group "$o_group" >/dev/null 2>&1; then
+        warn "нет группы $o_group — заведите её на хосте"
+        fail=1
+    else
+        ok "владелец $OWNER существует"
+    fi
+fi
 
 # 1. Конфигурация nginx исправна ДО нас.
 #
