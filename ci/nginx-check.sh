@@ -55,13 +55,20 @@ fi
 # 4. Заголовки безопасности. Их подключают include'ом, и он обязан быть в
 #    КАЖДОМ location со своим add_header: nginx не складывает наборы, а
 #    заменяет их — location со своим Cache-Control молча теряет CSP и HSTS.
+# Это эвристика, а не доказательство: проекты подключают заголовки
+# по-разному — общим сниппетом или инлайном. Поэтому здесь только
+# предупреждение, а настоящая проверка — эмпирическая, по ответу живого
+# сервера после выкатки (release.sh, шаг проверки заголовков).
 if grep -qE '^\s*add_header' "$CONF"; then
-    locs=$(grep -cE '^\s*location\s' "$CONF" || true)
-    incs=$(grep -cE 'include .*security-headers' "$CONF" || true)
-    if (( locs > 0 && incs <= 1 )); then
-        bad "в конфиге $locs location, но include заголовков встречается $incs раз — add_header в location затирает серверные заголовки"
+    srv_hdr=$(awk '/^\s*location\s/{inloc=1} /^\s*}/{inloc=0} !inloc && /^\s*add_header/{n++} END{print n+0}' "$CONF")
+    loc_hdr=$(awk '/^\s*location\s/{inloc=1} /^\s*}/{inloc=0} inloc && /^\s*add_header/{n++} END{print n+0}' "$CONF")
+    incs=$(grep -cE 'include .*(security-headers|headers)' "$CONF" || true)
+    if (( srv_hdr > 0 && loc_hdr > 0 && incs == 0 )); then
+        note "предупреждение: add_header есть и на уровне server ($srv_hdr), и внутри location ($loc_hdr)."
+        note "nginx не складывает наборы, а заменяет их — location со своим add_header теряет серверные."
+        note "Проверьте ответ сервера: curl -sI https://<домен>/ | grep -i 'strict-transport\\|content-security'"
     else
-        good "заголовки подключены в каждом location ($incs включений)"
+        good "заголовки не теряются в location (server=$srv_hdr, location=$loc_hdr, include=$incs)"
     fi
 fi
 
@@ -83,6 +90,16 @@ mkdir -p /etc/nginx/sites-enabled /etc/nginx/snippets
 # include не падал по причине, не связанной с проверяемым конфигом.
 : > /etc/nginx/snippets/samoy-security-headers.conf
 : > /etc/nginx/snippets/cache.conf
+# Файлы, которые certbot кладёт на боевой хост. На раннере их нет, и без
+# заглушек nginx падает по причине, не связанной с проверяемым конфигом.
+# openssl нужен и здесь (dhparam), и ниже (сертификаты) — ставим один раз
+# до первого использования.
+apk add --no-cache openssl >/dev/null 2>&1
+mkdir -p /etc/letsencrypt
+: > /etc/letsencrypt/options-ssl-nginx.conf
+# nginx разбирает содержимое ssl_dhparam, пустышка его не устроит.
+# 1024 бит достаточно: файл нужен только для проверки синтаксиса.
+openssl dhparam -out /etc/letsencrypt/ssl-dhparams.pem 1024 >/dev/null 2>&1
 echo '$conf_b64' | base64 -d > /etc/nginx/sites-enabled/site.conf
 
 # Пустой конфиг обязан быть замечен: иначе проверка снова станет
@@ -101,11 +118,12 @@ WRAP
 
 # Самоподписанные сертификаты по путям из конфига: проверяем синтаксис,
 # а не наличие боевых ключей.
-apk add --no-cache openssl >/dev/null 2>&1
 for crt in \$(grep -hoE 'ssl_certificate[[:space:]]+[^;]+' /etc/nginx/sites-enabled/site.conf | awk '{print \$2}' | sort -u); do
     key=\$(echo "\$crt" | sed 's/fullchain/privkey/')
     mkdir -p "\$(dirname "\$crt")" "\$(dirname "\$key")"
     openssl req -x509 -newkey rsa:2048 -nodes -keyout "\$key" -out "\$crt" -days 1 -subj '/CN=test' >/dev/null 2>&1
+    # chain.pem нужен для OCSP stapling (ssl_trusted_certificate).
+    cp "\$crt" "\$(dirname "\$crt")/chain.pem" 2>/dev/null || true
 done
 
 nginx -t
