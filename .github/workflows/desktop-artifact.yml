@@ -1,0 +1,119 @@
+name: desktop-artifact
+
+# Сборка и публикация установщика.
+#
+# Отличие от остальных архетипов: ничего не выкатывается на сервер. Артефакт
+# собирается на windows-раннере, публикуется в GitHub Release с чексуммой и
+# оттуда раздаётся сайтом.
+#
+#   jobs:
+#     installer:
+#       uses: tr0llex/deploy-kit/.github/workflows/desktop-artifact.yml@main
+#       with:
+#         build: ./scripts/build-installer.ps1 -Configuration Release -AppVersion $env:DEPLOY_VERSION
+#         artifact: scripts/generated_downloads/ChillHub-Setup.exe
+#       secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      build:
+        description: 'Команда сборки (PowerShell)'
+        required: true
+        type: string
+      artifact:
+        description: 'Путь к готовому установщику'
+        required: true
+        type: string
+      gates:
+        description: 'Проверки перед сборкой (PowerShell), необязательно'
+        required: false
+        type: string
+        default: ''
+      publish:
+        description: 'Публиковать в GitHub Release (только для тегов)'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Версия релиза
+        id: ver
+        shell: bash
+        run: |
+          V="$(git describe --tags --exact-match 2>/dev/null || true)"
+          [ -n "$V" ] || V="0.0.0-$(date -u '+%Y%m%d')-$(git rev-parse --short HEAD)"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Версия: $V"
+
+      - name: Проверки
+        if: inputs.gates != ''
+        shell: pwsh
+        run: ${{ inputs.gates }}
+
+      - name: Собрать установщик
+        shell: pwsh
+        env:
+          DEPLOY_VERSION: ${{ steps.ver.outputs.version }}
+        run: ${{ inputs.build }}
+
+      - name: Чексумма
+        id: sum
+        shell: bash
+        run: |
+          F="${{ inputs.artifact }}"
+          [ -f "$F" ] || { echo "::error::сборка не создала $F"; exit 1; }
+          SHA=$(sha256sum "$F" | cut -d' ' -f1)
+          SIZE=$(du -h "$F" | cut -f1)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Размер: $SIZE"
+          echo "SHA-256: $SHA"
+          # Файл с чексуммой едет рядом с установщиком: скачавший должен иметь
+          # возможность проверить, что получил именно то, что собрано здесь.
+          echo "$SHA  $(basename "$F")" > "$F.sha256"
+
+      # Подпись кода. Сертификата пока нет: у физлица доступен только OV, и
+      # ключ по правилам CA/B Forum обязан лежать на аппаратном носителе —
+      # в раннер его не воткнуть, нужна облачная подпись. Шаг включится сам,
+      # когда появятся секреты; до тех пор рядом с файлом лежит SHA-256.
+      - name: Подписать
+        if: env.SIGNING_AVAILABLE == 'true'
+        env:
+          SIGNING_AVAILABLE: ${{ secrets.CODE_SIGN_CERT != '' }}
+        shell: pwsh
+        run: echo "подпись будет здесь"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ steps.ver.outputs.version }}
+          path: |
+            ${{ inputs.artifact }}
+            ${{ inputs.artifact }}.sha256
+          retention-days: 30
+
+      - name: Опубликовать в Release
+        if: inputs.publish && startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
+            --notes "Установщик ChillHub ${{ steps.ver.outputs.version }}
+
+          SHA-256: \`${{ steps.sum.outputs.sha }}\`
+
+          Windows покажет предупреждение SmartScreen: установщик не подписан.
+          «Подробнее» → «Выполнить в любом случае»." \
+            "${{ inputs.artifact }}" "${{ inputs.artifact }}.sha256" \
+            || gh release upload "${{ github.ref_name }}" \
+                 "${{ inputs.artifact }}" "${{ inputs.artifact }}.sha256" --clobber
