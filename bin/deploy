@@ -99,10 +99,14 @@ fi
 # Кладём version.json прямо в артефакт: по нему выкатка себя проверяет, и его
 # же читает агент статус-страницы.
 if [[ "${WRITE_VERSION_FILE:-1}" == "1" ]] && ! (( DRY )); then
+    # Кладём в public/, если он есть: сервис раздаёт статику именно оттуда,
+    # и только так файл окажется доступен по /version.json — а значит, шаг
+    # сверки версии сможет отличить «выкатилось» от «выглядит выкаченным».
+    VDIR="$ARTIFACT_DIR"; [[ -d "$ARTIFACT_DIR/public" ]] && VDIR="$ARTIFACT_DIR/public"
     printf '{"version":"%s","commit":"%s","builtAt":"%s"}\n' \
         "$VERSION" "$(git rev-parse --short HEAD 2>/dev/null || echo local)" \
-        "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$ARTIFACT_DIR/version.json"
-    ok "version.json записан"
+        "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$VDIR/version.json"
+    ok "version.json записан в ${VDIR#$PWD/}"
 fi
 
 # --- упаковка -------------------------------------------------------------
