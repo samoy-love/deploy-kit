@@ -4,6 +4,7 @@
 #   deploy --config .deploy-kit/prod.env            # собрать и выкатить
 #   deploy --config .deploy-kit/prod.env --dry-run  # показать план
 #   deploy --config .deploy-kit/prod.env --no-build # выкатить уже собранное
+#   deploy --config .deploy-kit/prod.env --allow-unpushed  # коммита нет на remote
 #   deploy --config … --allow-same-version          # осознанный повтор версии
 #
 # Принципиально: CI и этот скрипт читают ОДИН и тот же файл-описание проекта
@@ -35,13 +36,14 @@ ok()   { printf '%s✓%s %s\n' "$GRN" "$RST" "$*"; }
 warn() { printf '%s!%s %s\n' "$YEL" "$RST" "$*" >&2; }
 die()  { printf '%s✗%s %s\n' "$RED" "$RST" "$*" >&2; exit 1; }
 
-CONFIG=""; DRY=0; BUILD=1; ALLOW_SAME=0
+CONFIG=""; DRY=0; BUILD=1; ALLOW_SAME=0; ALLOW_UNPUSHED=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --config)   CONFIG="$2"; shift 2 ;;
         --dry-run)  DRY=1; shift ;;
         --no-build) BUILD=0; shift ;;
         --allow-same-version) ALLOW_SAME=1; shift ;;
+        --allow-unpushed) ALLOW_UNPUSHED=1; shift ;;
         -h|--help)  sed -n '2,30p' "$0"; exit 0 ;;
         *) die "неизвестный аргумент: $1" ;;
     esac
@@ -74,6 +76,16 @@ SCP=(scp -i "$DEPLOY_KEY" -o StrictHostKeyChecking=yes)
 KIND="${DEPLOY_KIND:-manual}"          # пайплайн выставляет DEPLOY_KIND=release
 if git rev-parse --git-dir >/dev/null 2>&1; then
     VERSION="$KIND-$(date -u '+%Y%m%d-%H%M%S')-$(git rev-parse --short HEAD)"
+
+    # Коммит обязан существовать где-то, кроме этой машины. Иначе по релизу на
+    # сервере нельзя узнать, какой код там работает: на проде Snakes так и
+    # оказался коммит, которого нет ни в одной ветке и ни на одном remote —
+    # версия есть, а восстановить по ней нечего.
+    if [[ -z "$(git branch -r --contains HEAD 2>/dev/null)" ]] && ! (( ALLOW_UNPUSHED )); then
+        die "коммит $(git rev-parse --short HEAD) не запушен ни в одну удалённую ветку.
+   Выкатив его, вы получите на сервере код, который невозможно восстановить.
+   Запушьте ветку либо, если это осознанно, добавьте --allow-unpushed"
+    fi
 else
     VERSION="$KIND-$(date -u '+%Y%m%d-%H%M%S')"
 fi
