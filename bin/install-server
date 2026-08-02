@@ -43,6 +43,22 @@ SCP=(scp -i "$DEPLOY_KEY" -o StrictHostKeyChecking=yes)
 
 FILES=(lib.sh release.sh rollback.sh preflight.sh nginx-apply.sh)
 
+# На сервере обязана оказаться версия, прошедшая ревью и CI, а не та, что
+# случайно лежит в рабочей копии. Проверка не теоретическая: выкладка уже
+# один раз увезла на прод недоделанный nginx-apply.sh с чужой ветки — просто
+# потому, что каталог был переключён на неё.
+if [[ "${SKIP_BRANCH_CHECK:-0}" != "1" ]]; then
+    git -C "$KIT_DIR" fetch -q origin main 2>/dev/null || true
+    for f in "${FILES[@]}"; do
+        if ! git -C "$KIT_DIR" diff --quiet origin/main -- "server/$f" 2>/dev/null; then
+            die "server/$f в рабочей копии отличается от origin/main.
+   Выкладывать можно только влитое: влейте изменения либо возьмите чистую
+   копию main. Осознанный обход: SKIP_BRANCH_CHECK=1"
+        fi
+    done
+    ok "рабочая копия совпадает с origin/main"
+fi
+
 # Сверяем без учёта концов строк: на Windows рабочая копия хранится с CRLF,
 # и различие в них — не различие в коде.
 printf '\n%sЧто на сервере %s:%s\n' "$BLD" "$DEST" "$RST"
