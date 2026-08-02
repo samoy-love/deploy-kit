@@ -84,13 +84,35 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
 
+      # Входы приходят в шаг ПЕРЕМЕННЫМИ ОКРУЖЕНИЯ, а не подстановкой ${{ }}
+      # в тело скрипта. Разница не косметическая: при подстановке значение
+      # становится ЧАСТЬЮ ТЕКСТА скрипта, и строка вида `x"; curl ...; #`
+      # выполняется как отдельная команда до всего остального — со всеми
+      # секретами job'а под рукой. Через env значение остаётся данными.
+      #
+      # Сейчас это защита в глубину, а не закрытая дыра: триггеры у вызывающих
+      # доверенные (push/теги/dispatch, pull_request_target нигде нет), то есть
+      # содержимое входов пишет тот же, кто и так может править этот пайплайн.
+      # Но глубина здесь стоит трёх строк.
       - name: Прочитать описание цели
         id: cfg
+        env:
+          CONFIG: ${{ inputs.config }}
         run: |
-          [ -f "${{ inputs.config }}" ] || { echo "::error::нет файла ${{ inputs.config }}"; exit 1; }
+          # Путь обязан быть относительным и не выходить из репозитория:
+          # описание цели — файл проекта, а не произвольная точка ФС раннера.
+          case "$CONFIG" in
+            /*|*..*) echo "::error::config должен быть относительным путём внутри репозитория, получено: $CONFIG"; exit 1 ;;
+          esac
+          [ -f "$CONFIG" ] || { echo "::error::нет файла $CONFIG"; exit 1; }
           # Значения уезжают в outputs, а не в глобальный env: так видно,
           # что именно пайплайн взял из описания.
-          set -a; . "${{ inputs.config }}"; set +a
+          set -a
+          # Путь к описанию цели приходит параметром workflow — проследить его
+          # статически нельзя, и это осознанно: файл принадлежит проекту.
+          # shellcheck disable=SC1090
+          . "./$CONFIG"
+          set +a
           for v in APP ARTIFACT_DIR ROOT; do
             [ -n "${!v}" ] || { echo "::error::в описании не задано $v"; exit 1; }
           done
@@ -121,22 +143,34 @@ jobs:
 
       # Полный регресс. Красный регресс = выкатки нет: main обязан быть
       # всегда выкатываемым, раз каждый мерж уезжает на прод.
+      #
+      # gates тоже приходит переменной окружения и выполняется через eval:
+      # выполнить эту строку — и есть смысл шага, но текстом скрипта она при
+      # этом не становится (см. пояснение у шага «Прочитать описание цели»).
       - name: Полный регресс
-        run: ${{ inputs.gates }}
+        env:
+          GATES: ${{ inputs.gates }}
+        run: eval "$GATES"
 
-      # Ранняя проверка конфига — приятно, но не обязательна: тот же конфиг
-      # на сервере проходит nginx-apply.sh, который сверяет версию nginx,
-      # запускает nginx -t и откатывается при провале. Поэтому если скрипт
-      # недоступен (deploy-kit приватный — raw.githubusercontent отдаёт 404),
-      # шаг предупреждает и пропускается, а не валит выкатку.
+      # Ранняя проверка конфига: тот же конфиг на сервере ещё раз проходит
+      # nginx-apply.sh, который сверяет версию nginx, запускает nginx -t и
+      # откатывается при провале. Здесь это делается до того, как выкатка
+      # что-либо тронет.
+      #
+      # Раньше на этом месте стояла мягкая ветка: если скрипт не скачался,
+      # шаг печатал ::warning:: «deploy-kit приватный» и пропускался.
+      # Репозиторий публичный — ветка была мертва, а её существование делало
+      # шаг молча пропускаемым при ЛЮБОМ сбое сети. Теперь недоступность
+      # скрипта — это отказ: проверку, которую нельзя выполнить, нельзя и
+      # считать пройденной.
       - name: Проверить конфиг nginx
         if: inputs.nginx-conf != ''
+        env:
+          NGINX_CONF: ${{ inputs.nginx-conf }}
         run: |
-          if curl -fsSL https://raw.githubusercontent.com/tr0llex/deploy-kit/main/ci/nginx-check.sh -o /tmp/nginx-check.sh 2>/dev/null; then
-            bash /tmp/nginx-check.sh "${{ inputs.nginx-conf }}"
-          else
-            echo "::warning::ci/nginx-check.sh недоступен (deploy-kit приватный) — ранняя проверка конфига пропущена, защита остаётся на стороне сервера"
-          fi
+          curl -fsSL https://raw.githubusercontent.com/tr0llex/deploy-kit/main/ci/nginx-check.sh -o /tmp/nginx-check.sh \
+            || { echo "::error::не удалось скачать ci/nginx-check.sh — ранняя проверка конфига невозможна"; exit 1; }
+          bash /tmp/nginx-check.sh "$NGINX_CONF"
 
       # Цель с WRITE_VERSION_FILE=0 version.json не раздаёт — класть его в
       # артефакт нечестно: шлюз бы сверял файл, до которого снаружи не дойти.
@@ -186,7 +220,7 @@ jobs:
           HOST: ${{ secrets.DEPLOY_HOST }}
           USER: ${{ secrets.DEPLOY_USER }}
         run: |
-          scp -i ~/.ssh/deploy_key "${{ inputs.nginx-conf }}" "$USER@$HOST:/tmp/site.conf"
+          scp -i ~/.ssh/deploy_key "$NGINX_CONF" "$USER@$HOST:/tmp/site.conf"
           ssh -i ~/.ssh/deploy_key "$USER@$HOST" \
             "sudo /opt/deploy-kit/nginx-apply.sh --app '${{ steps.cfg.outputs.app }}' \
                --conf /tmp/site.conf --dest '${{ steps.cfg.outputs.nginx_dest }}' --enable \
