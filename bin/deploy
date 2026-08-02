@@ -4,6 +4,7 @@
 #   deploy --config .deploy-kit/prod.env            # собрать и выкатить
 #   deploy --config .deploy-kit/prod.env --dry-run  # показать план
 #   deploy --config .deploy-kit/prod.env --no-build # выкатить уже собранное
+#   deploy --config … --allow-same-version          # осознанный повтор версии
 #
 # Принципиально: CI и этот скрипт читают ОДИН и тот же файл-описание проекта
 # и вызывают ОДИН и тот же release.sh на сервере. Иначе «локально катится, а
@@ -34,12 +35,13 @@ ok()   { printf '%s✓%s %s\n' "$GRN" "$RST" "$*"; }
 warn() { printf '%s!%s %s\n' "$YEL" "$RST" "$*" >&2; }
 die()  { printf '%s✗%s %s\n' "$RED" "$RST" "$*" >&2; exit 1; }
 
-CONFIG=""; DRY=0; BUILD=1
+CONFIG=""; DRY=0; BUILD=1; ALLOW_SAME=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --config)   CONFIG="$2"; shift 2 ;;
         --dry-run)  DRY=1; shift ;;
         --no-build) BUILD=0; shift ;;
+        --allow-same-version) ALLOW_SAME=1; shift ;;
         -h|--help)  sed -n '2,30p' "$0"; exit 0 ;;
         *) die "неизвестный аргумент: $1" ;;
     esac
@@ -137,6 +139,11 @@ ARGS=(--app "$APP" --version "$VERSION" --archive "$REMOTE_ARCHIVE" --root "$ROO
 [[ -n "${NEIGHBOURS:-}" ]]  && ARGS+=(--neighbours "$NEIGHBOURS")
 [[ -n "${OWNER:-}" ]]       && ARGS+=(--owner "$OWNER")
 [[ "${NGINX_RELOAD:-0}" == "1" ]] && ARGS+=(--nginx-reload)
+# Цель не раздаёт version.json — шлюз и сверка перейдут на имя релиза в
+# симлинке. Без этого флага release.sh потребовал бы от неё того, чего она
+# по описанию и не обещает.
+[[ "${WRITE_VERSION_FILE:-1}" == "0" ]] && ARGS+=(--no-version-file)
+(( ALLOW_SAME )) && ARGS+=(--allow-same-version)
 (( DRY )) && ARGS+=(--dry-run)
 
 if ! (( DRY )); then
@@ -145,7 +152,17 @@ if ! (( DRY )); then
 fi
 
 log "запускаю выкатку на сервере"
-"${SSH[@]}" "sudo /opt/deploy-kit/release.sh $(printf '%q ' "${ARGS[@]}")" || die "выкатка провалена"
+# Код 3 — отказ версионного шлюза: прод не тронут, и это не поломка выкатки.
+# Различать их обязательно, иначе на месте внятной причины остаётся
+# «упало непонятно почему» и следом попытка чинить работающий сервер.
+RC=0
+"${SSH[@]}" "sudo /opt/deploy-kit/release.sh $(printf '%q ' "${ARGS[@]}")" || RC=$?
+if (( RC == 3 )); then
+    warn "версия $VERSION не прошла версионный шлюз (см. сообщение выше)"
+    die "выкатка $APP отменена шлюзом — прод остался на прежнем релизе"
+elif (( RC != 0 )); then
+    die "выкатка провалена (код $RC)"
+fi
 
 (( DRY )) || "${SSH[@]}" "rm -f '$REMOTE_ARCHIVE'"
 
