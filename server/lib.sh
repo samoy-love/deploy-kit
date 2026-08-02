@@ -186,8 +186,7 @@ compare_versions() {
 # Откуда взята версия прода — для сообщений шлюза.
 # Читается вызывающим release.sh после version_gate — shellcheck не видит
 # использования через source и считает переменную мёртвой.
-# shellcheck disable=SC2034
-LIVE_VERSION_SOURCE=""
+export LIVE_VERSION_SOURCE=""
 
 current_live_version() {
     local url="$1" link="$2" got=""
