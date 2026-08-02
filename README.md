@@ -1,244 +1,252 @@
 # deploy-kit
 
-Единый релизный пайплайн для всех проектов samoy.love: сайты, Go-сервисы и
-установщик едут на прод по одному и тому же конвейеру.
+English · [Русский](README.ru.md)
 
-Репозиторий содержит переиспользуемые workflow, серверные скрипты и общие
-конфиги nginx. В проектных репозиториях остаются вызовы на 20 строк.
+[![CI](https://github.com/tr0llex/deploy-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/tr0llex/deploy-kit/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![nginx 1.24](https://img.shields.io/badge/nginx-1.24-009639)
 
----
+The single release pipeline behind every samoy.love project: static sites, Go
+services and a desktop installer all reach production through the same
+conveyor.
 
-## 1. Зачем
+## Why
 
-Раньше каждый проект изобретал деплой заново. Что из этого выходило:
+Every project used to reinvent deployment. Only Snakes could roll back — the
+rest "rolled back" by deploying again. The launcher ran `go test` in a workflow
+that had nothing to do with the deploy that followed it. One shared nginx file
+described two sites at once, so deploying one of them took the neighbour down.
+Several repositories deploy to **one** host, yet each held its own mutex, so
+two pipelines could reload nginx at the same moment. Secret names differed from
+repository to repository.
 
-- откат был только у Snakes — остальные откатывались повторным деплоем;
-- лаунчер прогонял `go test` в отдельном workflow, никак не связанном с выкаткой;
-- общий `launcher.conf` описывал два сайта разом, и деплой одного сносил соседний;
-- четыре репозитория катят на **один** хост, но у каждого свой мьютекс — параллельные
-  выкатки могли одновременно перезагружать nginx;
-- имена секретов различались в каждом репозитории.
+All of that is reduced here to one contract: one target description, one
+`release.sh` on the server, one queue on the host. A project repository keeps a
+twenty-line workflow call and an `.env` file.
 
-Здесь всё это сведено к одному контракту.
+## The conveyor
 
-## 1.1. Быстрый старт: `dk`
+Identical for every archetype; only the build step differs.
 
-Одна команда на всё хозяйство. Цели обнаруживаются сами — каждый
-`.deploy-kit/*.env` в соседних репозиториях становится целью, регистрировать
-ничего не нужно.
-
-```bash
-dk                          # что сейчас на проде: коды ответов и версии
-dk list                     # все цели
-dk deploy                   # все цели проекта, в котором стоите
-dk deploy snakes metro      # выборочно
-dk deploy --all             # вообще всё
-dk deploy --all --dry-run   # показать план, ничего не трогая
-dk rollback snakes --list   # какие релизы лежат на сервере
-dk rollback snakes          # откатить на предыдущий
-dk help                     # подробности
+```
+1. Gates          lint, types, tests (go test -race for Go), build
+2. Artifact       version from tag or release-<date>-<commit>, packed as tar.gz
+3. Preconditions  on the host: disk space, nginx -t, unit state, release owner
+3a. Version gate  version must be set and strictly newer than production
+4. Upload         into releases/<version>, ownership applied
+5. Backup         snapshot of the nginx config before it is replaced
+6. Switch         atomic flip of the current symlink
+7. Apply          nginx -t && reload, or systemctl restart
+8. Verify         /healthz, /version.json equals the expected version, neighbours
+9. Rollback       any failure after step 6 returns current to the previous release
+10. Notify        Telegram message with the outcome
 ```
 
-Установка: добавить `bin/` в `PATH` либо завести алиас.
+Step 8 compares the **version**, not just the status code — that is what
+catches "the deploy was green but the files are still old". Step 3a refuses
+placeholder versions (`dev`, `unknown`, empty) and anything not newer than what
+production reports, and exits with code 3 while the symlink is untouched.
+
+## How it works
+
+**Production is built once.** The artifact is produced on the runner and
+shipped as is. Nothing is compiled on the server, so what was tested is exactly
+what runs.
+
+**Deployment is atomic.** Files land in a new `releases/<version>` directory
+and only then does `current` flip, through a temporary symlink and `mv -T`.
+Between `rm` and `ln` there would be a window where the path does not exist —
+this way there is none, and a half-applied state cannot be observed.
+
+**Every deploy verifies itself and failure rolls back on its own.** After the
+switch the pipeline waits for `/healthz`, compares `/version.json` with the
+version it shipped, and probes the neighbouring domains. Any of those failing
+returns `current` to the previous release and restarts the unit — because
+`main` goes to production on every merge, an unattended deploy has to be able
+to undo itself.
+
+**One host, one queue.** The mutex is a `flock` on `/var/lock/deploy-kit.lock`,
+held for the whole host rather than per repository. GitHub concurrency groups
+only serialise runs inside a single repository, and the projects that share
+this server live in different ones.
+
+**Nobody touches anyone else's file.** A project may write exactly one file in
+`sites-available` (or `conf.d`), `nginx-apply.sh` records the state of the
+whole configuration *before* the change so a pre-existing breakage is not
+mistaken for ours, and the release is reverted from the backup if `nginx -t`
+fails afterwards.
+
+**The scripts on the server are themselves a release.** `install-server`
+compares checksums between the repository and `/opt/deploy-kit`, refuses to
+upload anything that differs from `origin/main`, stages the files in a temp
+directory and runs `bash -n` there — a broken `release.sh` installed in place
+would leave nothing to deploy or roll back with.
+
+## Stack
+
+Bash (strict mode, shellcheck-clean), GitHub Actions reusable workflows,
+systemd, nginx 1.24, `flock`, `tar` + `scp` over SSH. No third-party actions
+for SSH or file transfer: twenty lines of local code instead of an external
+dependency in the supply chain.
+
+## Quick start
+
+`dk` is one command for the whole estate. Targets discover themselves — every
+`.deploy-kit/*.env` in a neighbouring repository becomes a target, nothing has
+to be registered.
 
 ```bash
-echo 'export PATH="$PATH:/путь/к/deploy-kit/bin"' >> ~/.bashrc
+echo 'export PATH="$PATH:/path/to/deploy-kit/bin"' >> ~/.bashrc
 mkdir -p ~/.config/deploy-kit && cp dk.conf.example ~/.config/deploy-kit/dk.conf
-# в dk.conf — хост, пользователь и путь к ключу; значения с пробелами в кавычках
+# dk.conf holds host, user and key path; quote values that contain spaces
 ```
 
-Локальная выкатка идёт **тем же путём, что и CI**: одно описание цели и один
-`release.sh` на сервере. Расхождения «локально работает, в CI нет» исключены
-по построению.
+```bash
+dk                          # what is live right now: status codes and versions
+dk list                     # all targets
+dk deploy                   # every target of the project you are standing in
+dk deploy snakes metro      # selected targets
+dk deploy --all --dry-run   # show the plan, change nothing
+dk rollback snakes --list   # which releases are on the server
+dk rollback snakes          # back to the previous one
+dk help
+```
 
-## 2. Принципы
+A local deploy takes **the same path as CI**: the same target description and
+the same `release.sh` on the server. "Works locally, fails in CI" cannot happen
+by construction.
 
-**Прод собирается один раз.** Артефакт собирается на раннере, дальше по хостам
-едет ровно он. Никаких сборок «на месте».
+Updating the server-side scripts:
 
-**Выкатка атомарна.** Файлы кладутся в новый каталог релиза, и только потом
-переключается симлинк. Половинчатого состояния не бывает.
+```bash
+install-server              # show drift between repository and /opt/deploy-kit
+install-server --apply      # upload (only what is merged into main)
+```
 
-**Каждая выкатка проверяется, и провал откатывается сам.** Не «задеплоили и
-ушли»: healthcheck после переключения обязателен, при неуспехе симлинк
-возвращается на предыдущий релиз.
+## Structure
 
-**Хост один — очередь одна.** Мьютекс `flock` на весь сервер, а не на репозиторий.
+| Path | Purpose |
+|---|---|
+| `.github/workflows/static-site.yml` | reusable pipeline for static sites |
+| `.github/workflows/go-service.yml` | reusable pipeline for Go services with systemd |
+| `.github/workflows/desktop-artifact.yml` | reusable pipeline for the Windows installer |
+| `.github/workflows/ci.yml` | own CI: shell syntax, shellcheck, real nginx, actionlint |
+| `bin/dk` | CLI: production state, deploy, rollback |
+| `bin/deploy` | one local deploy, the same path CI takes |
+| `bin/install-server` | ships `server/*.sh` to `/opt/deploy-kit` |
+| `server/release.sh` | unpack → backup → switch → verify → roll back |
+| `server/rollback.sh` | manual rollback to the previous or a named release |
+| `server/preflight.sh` | disk space, `nginx -t`, unit state, release owner |
+| `server/nginx-apply.sh` | diff → backup → install → `nginx -t` → revert |
+| `server/lib.sh` | host mutex, version gate, healthchecks, release pruning |
+| `ci/nginx-check.sh` | validates a site config in a real nginx 1.24 container |
+| `nginx/sites` | one file per domain, exactly what is enabled on the server |
+| `nginx/snippets` | shared fragments included from `sites/` |
+| `nginx/conf.d` | what must live at `http` level (log formats) |
+| `dk.conf.example` | template for `~/.config/deploy-kit/dk.conf` |
 
-**Чужое не трогаем.** Проект правит только свой файл в `sites-available`.
-Проверка соседних сайтов после каждой выкатки.
+`nginx/` is the single source of truth for the whole ecosystem's nginx
+configuration; see [`nginx/README.md`](nginx/README.md) for the rules that
+apply there and [`nginx/gzip.md`](nginx/gzip.md) for compression.
 
-## 3. Архетипы
+## What is guaranteed, and what checks it
 
-| Архетип | Для чего | Чем заканчивается |
+| Guarantee | Enforced by |
+|---|---|
+| A red gate never reaches production | `gates` input is a required step of every reusable workflow |
+| A release without a version never ships | `version_gate` in `server/lib.sh`, exit code 3 |
+| An older build never ships as a new one | `compare_versions`: timestamp and semver schemes, never mixed |
+| Production is never half-switched | `switch_symlink`: temporary link plus `mv -T` |
+| A green deploy with stale files is caught | `check_version` against `/version.json`, or the release name in `current` |
+| A failed deploy does not stay on production | `rollback` on health, version or neighbour failure |
+| Deploying one site never breaks another | `check_neighbours` plus one file per project in `nginx-apply.sh` |
+| Two repositories never deploy at once | `flock` on `/var/lock/deploy-kit.lock`, host-wide |
+| A config valid locally but invalid on prod is rejected | `ci/nginx-check.sh` runs the real nginx 1.24 |
+| The scripts on the server match the repository | checksum comparison in `install-server`, upload only from `main` |
+
+The repository's own CI runs shell syntax checks separately from shellcheck (a
+parsed script with complaints can be fixed, an unparsable one cannot), validates
+every site config in an nginx 1.24 container, lints the workflows with
+actionlint and asserts that `dk help` still runs.
+
+## How other projects use it
+
+A project repository keeps a workflow call:
+
+```yaml
+jobs:
+  deploy:
+    uses: tr0llex/deploy-kit/.github/workflows/static-site.yml@main
+    with:
+      config: .deploy-kit/prod.env
+      gates: npm ci && npm run test:coverage && npm run build
+    secrets: inherit
+```
+
+and a target description, `.deploy-kit/prod.env`:
+
+```bash
+APP=samoylove                       # name of the target and of the directory on the host
+BUILD_CMD="npm ci && npm run build"
+ARTIFACT_DIR=dist                   # what gets packed
+ROOT=/var/www/samoy.love            # holds releases/ and current
+OWNER=ubuntu:ubuntu
+NGINX_RELOAD=1                      # static: reload nginx after the switch
+UNIT=                               # services: systemd unit to restart instead
+HEALTH=https://samoy.love/
+VERSION_URL=https://samoy.love/version.json
+NEIGHBOURS=metro.samoy.love,snakes.samoy.love
+```
+
+The same file drives `dk deploy`. Targets that do not serve `version.json` set
+`WRITE_VERSION_FILE=0`; the gate and the post-deploy check then read the release
+name from the `current` symlink instead.
+
+What a project must provide to enter the pipeline: `/healthz` returning 200 and
+the body `ok` without authentication, `/version.json` with `version`, `commit`
+and `builtAt`, and the standard layout
+`<root>/releases/<version>` with `current` and `previous` symlinks (the last
+five releases are kept). Secret names are the same everywhere: `DEPLOY_HOST`,
+`DEPLOY_USER`, `DEPLOY_SSH_KEY`, `SSH_HOST_KEY`, `TELEGRAM_BOT_TOKEN`,
+`TELEGRAM_CHAT_ID`. `SSH_HOST_KEY` comes from a secret rather than
+`ssh-keyscan`, which trusts the first answer and accepts a substitution
+silently.
+
+Current targets:
+
+| Target | Archetype | Repository |
 |---|---|---|
-| `static-site` | samoy.love, metro, лендинг лаунчера, админка, статус | `rsync` в релиз, переключение симлинка, `nginx -t`, reload |
-| `go-service` | серверы лаунчера, админки, Snakes | бинарь в релиз, `systemctl restart`, healthcheck |
-| `desktop-artifact` | установщик ChillHub | сборка на `windows-latest`, SHA-256, GitHub Release |
+| samoy.love | static-site | [samoy.love](https://github.com/tr0llex/samoy.love) |
+| metro.samoy.love | static-site | [metro-map](https://github.com/tr0llex/metro-map) |
+| launcher.samoy.love, admin UI | static-site | [chillhub](https://github.com/tr0llex/chillhub) |
+| launcher and admin servers | go-service | [chillhub](https://github.com/tr0llex/chillhub) |
+| ChillHub installer | desktop-artifact | [chillhub](https://github.com/tr0llex/chillhub) |
+| Snakes server and client | go-service | [snakes](https://github.com/tr0llex/snakes) |
+| status.samoy.love | static-site + agent | [status.samoy.love](https://github.com/tr0llex/status.samoy.love) |
 
-## 4. Конвейер
+The Snakes client ships in **one artifact** with its server: they share a
+binary protocol, and versions drifting apart break packet parsing.
 
-Один и тот же для всех, различается только шаг сборки.
+## Part of samoy.love
 
-```
-1. Гейты        линт, типы, тесты (go test -race для Go), сборка
-2. Артефакт     версия из тега + SHA-256, загрузка как artifact
-3. Предусловия  на хосте: nginx -t, состояние юнитов, свободное место
-3a. Шлюз        версия задана и строго новее той, что на проде
-4. Загрузка     в releases/<версия>, права и владелец
-5. Бэкап        снимок текущего состояния и конфига
-6. Переключение атомарная смена симлинка current
-7. Применение   nginx -t && reload либо systemctl restart
-8. Проверка     /healthz, /version.json = ожидаемая версия, соседние сайты
-9. Откат        при любом провале шага 8 — назад на предыдущий релиз
-10. Отчёт       HTML-артефакт + сообщение в Telegram
-```
+One domain, one server, one pipeline, one status page, one monitoring stack.
 
-Шаг 8 сверяет **версию**, а не только код 200: это ловит «деплой прошёл зелёным,
-а файлы остались старые».
-
-Шаг 3a — версионный шлюз. Релиз не едет, если версия не задана (`dev`,
-`unknown`, пусто) или не выросла относительно прода. Сравниваются либо
-таймштампы в именах релизов (`release-20260802-134500-abc1234`), либо
-семверные теги (`v1.4.0`); схемы между собой не смешиваются — несравнимая
-пара требует явного подтверждения, а не «разумного умолчания».
-
-Отказ шлюза — код возврата 3 и нетронутый симлинк: прод остаётся на прежнем
-релизе. Осознанный повтор версии (перевыкатка после ручной порчи каталога):
-
-```bash
-dk deploy <цель> --allow-same-version        # локально
-# в пайплайне — запуск с allow-same-version: true
-```
-
-Цели с `WRITE_VERSION_FILE=0` version.json не раздают: для них шлюз и сверка
-после выкатки читают имя релиза из симлинка `current`.
-
-## 5. Триггеры
-
-| Событие | Что происходит |
+| Project | What it is |
 |---|---|
-| PR | гейты без выкатки |
-| merge в `main`/`master` | автодеплой прода через вызов workflow отсюда |
-| тег `v*` | версионированный релиз: вшитая версия, GitHub Release, установщик |
-| ручной запуск | те же режимы + `dry-run` |
+| [samoy.love](https://github.com/tr0llex/samoy.love) | Homepage and project showcase: Astro, WebGL background, zero trackers |
+| [chillhub](https://github.com/tr0llex/chillhub) | ChillHub — Windows game launcher: diff updates, hash control, Go admin panel |
+| [snakes](https://github.com/tr0llex/snakes) | Browser territory-capture multiplayer: Go, WebSocket, binary protocol |
+| [metro-map](https://github.com/tr0llex/metro-map) | Offline PWA with the Moscow metro map: routing on the client, Canvas 2D |
+| [status.samoy.love](https://github.com/tr0llex/status.samoy.love) | Status page: uptime, versions, incidents; Go agent plus an external watchdog |
+| [metrics.samoy.love](https://github.com/tr0llex/metrics.samoy.love) | Monitoring and product analytics: Prometheus, Grafana, traffic from nginx logs |
+| [deploy-kit](https://github.com/tr0llex/deploy-kit) | This repository: the shared release pipeline |
 
-Раз каждый мерж уезжает на прод, `main` обязан быть всегда выкатываемым —
-поэтому гейты и автооткат здесь несущие, а не украшение.
+## Contacts
 
-## 6. Контракты
+Alexey Samoylov — [alex@samoy.love](mailto:alex@samoy.love) ·
+[t.me/tr0llex](https://t.me/tr0llex) ·
+[github.com/tr0llex](https://github.com/tr0llex)
 
-Что проект обязан предоставить, чтобы попасть в пайплайн.
+## License
 
-**`/healthz`** — 200 и тело `ok`, без авторизации, без обращений к БД.
-
-**`/version.json`** — для сервисов эндпоинт, для статики файл в корне сборки:
-
-```json
-{ "version": "v1.4.0", "commit": "5486b2d", "builtAt": "2026-08-02T00:15:00Z" }
-```
-
-**Раскладка на хосте** — единая для всех:
-
-```
-/opt/<app>/releases/<версия>/   или  /var/www/<site>/releases/<версия>/
-/opt/<app>/current -> releases/<версия>
-/opt/<app>/previous -> releases/<предыдущая>
-```
-
-Хранятся 5 последних релизов, дальше — удаление по возрасту с проверкой места.
-
-**nginx** — один файл на проект в `sites-available`, общие сниппеты отсюда,
-`http2` в форме `listen 443 ssl http2` (на проде nginx 1.24, отдельной
-директивы `http2 on` там ещё нет).
-
-## 7. Секреты
-
-Единые имена во всех репозиториях:
-
-| Секрет | Что это |
-|---|---|
-| `DEPLOY_HOST` | адрес хоста |
-| `DEPLOY_USER` | пользователь для ssh |
-| `DEPLOY_SSH_KEY` | приватный ключ деплоя |
-| `SSH_HOST_KEY` | публичный ключ хоста — вместо `ssh-keyscan` на лету |
-| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | уведомления |
-
-`SSH_HOST_KEY` из секрета, а не keyscan: keyscan доверяет первому ответу и
-принимает подмену молча.
-
-Всё, что уезжает на сервер, передаётся **base64** и декодируется там —
-ничего не интерполируется в удалённый shell как текст.
-
-## 8. Откат
-
-```bash
-deploy-kit rollback <app>          # на предыдущий релиз
-deploy-kit rollback <app> <версия> # на конкретный
-```
-
-Без пересборки: релизы уже лежат на диске. Конфиги nginx откатываются из
-бэкапа, снятого на шаге 5.
-
-## 9. Наблюдаемость
-
-Пайплайн и статус-страница связаны контрактами: `/healthz` и `/version.json`
-использует и шаг проверки, и агент [status.samoy.love](https://status.samoy.love).
-После выкатки версия на статус-странице меняется — это и есть подтверждение,
-что уехало именно то, что собрали.
-
-## 10. Структура
-
-```
-.github/workflows/
-  static-site.yml       reusable: сайты
-  go-service.yml        reusable: сервисы
-  desktop-artifact.yml  reusable: установщик
-actions/
-  ssh-setup/            ключ, known_hosts из секрета, гарантированная зачистка
-  remote-exec/          base64-передача входов
-  healthcheck/          проверки с ретраями
-server/
-  release.sh            выложить → бэкап → переключить → проверить → откатить
-  rollback.sh
-  preflight.sh          место на диске, nginx -t, состояние юнитов
-nginx/
-  security-headers.conf
-  cache.conf
-```
-
-## 11. Цели
-
-| # | Цель | Архетип | Репозиторий |
-|---|---|---|---|
-| 1 | samoy.love | static-site | Samoy.love-Homepage |
-| 2 | metro.samoy.love | static-site | MetroMap |
-| 3 | launcher.samoy.love | static-site | Launcher-Project |
-| 4 | Админка (UI) | static-site | Launcher-Project |
-| 5 | Сервер админки | go-service | Launcher-Project |
-| 6 | Сервер лаунчера | go-service | Launcher-Project |
-| 7 | Установщик | desktop-artifact | Launcher-Project |
-| 8 | Сервер Snakes + клиент | go-service | Snakes |
-| 9 | status.samoy.love | static-site + агент | Samoy.love-Status |
-
-Клиент Snakes едет **одним артефактом** с сервером: у них общий бинарный
-протокол, и разъехавшиеся версии ломают разбор пакетов.
-
-## 12. Порядок внедрения
-
-1. `release.sh`, `preflight.sh`, composite-действия, `static-site.yml`
-2. samoy.love и metro — самые простые потребители
-3. Snakes — его механика уже эталонная, меняются только обвязка и имена
-4. Лаунчер: пять целей, разделение монолитного деплоя, установщик
-5. Статус-страница: `/version.json` во всех сервисах вместо чтения дат с диска
-
-## 13. Чего здесь сознательно нет
-
-**Сторонних action для ssh и scp.** Двадцать строк своего кода вместо внешней
-зависимости в цепочке поставки.
-
-**Подписи установщика.** Сертификат не куплен; шаг оставлен заглушкой и
-включится появлением секретов. Пока рядом с установщиком публикуется SHA-256.
-
-**Офсайт-бэкапов.** По решению владельца снимки остаются на том же диске:
-это защита от логической потери, но не от отказа диска.
+[MIT](LICENSE).

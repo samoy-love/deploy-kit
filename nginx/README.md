@@ -17,8 +17,9 @@ conf.d/     то, что обязано жить на уровне http (фор�
 ## Журнал для метрик
 
 `conf.d/samoylove-log-metrics.conf` объявляет формат `samoylove_metrics`, а
-`samoy.love.conf` и `metro.conf` пишут им второй журнал
-`/var/log/nginx/samoylove_metrics.log`. Его читает экспортёр из `metrics.samoy.love`.
+конфиги сайтов пишут им второй журнал
+`/var/log/nginx/samoylove_metrics.log`. Его читает экспортёр из
+[metrics.samoy.love](https://github.com/tr0llex/metrics.samoy.love).
 
 В формате намеренно **нет** IP, User-Agent, Referer и строки запроса: только
 домен, метод, путь, код, объём и время ответа. Строку, которой не существует,
@@ -48,8 +49,13 @@ conf.d/     то, что обязано жить на уровне http (фор�
 Правки — в этот каталог, дальше выкатка:
 
 ```bash
-server/nginx-apply.sh --site sites/samoy.love.conf
+server/nginx-apply.sh --app samoylove \
+    --conf nginx/sites/samoy.love.conf \
+    --dest /etc/nginx/sites-available/samoy.love.conf --enable
 ```
+
+Файлы из `conf.d/` ставятся тем же скриптом, но **без** `--enable`: каталог
+подключён из `nginx.conf` целиком, включать там нечего.
 
 Скрипт снимает состояние **до** правки, кладёт бэкап, проверяет `nginx -t`
 и откатывается сам, если проверка не прошла. Руками в `/etc/nginx` не ходим:
@@ -62,9 +68,9 @@ server/nginx-apply.sh --site sites/samoy.love.conf
 
 - пути разъехались: `/var/www/site/current` у лаунчера, `/var/www/metro/current`
   у метро, `/var/www/samoy.love/current` у главной;
-- `metro.conf` отдаёт `robots.txt` из `/var/www/site` — то есть из каталога
-  лаунчера, где его нет, и запрос сваливается в HTML;
-- `robots.txt` есть только у главной и лаунчера, у остальных 404;
-- `chillhub-launcher.conf` — 1240 строк, из них больше половины комментарии.
+- отдельный `location` для `robots.txt` есть только у лаунчера, у остальных
+  файл едет из корня релиза или не едет вовсе;
+- `chillhub-launcher.conf` — больше тысячи строк, из них больше половины
+  комментарии.
 
 Нормализация — отдельным шагом, чтобы падение можно было связать с одной правкой.
