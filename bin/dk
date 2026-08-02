@@ -15,12 +15,30 @@
 
 set -Eeuo pipefail
 
-RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'; BLD=$'\033[1m'; DIM=$'\033[2m'; RST=$'\033[0m'
-[[ -t 1 ]] || { RED=''; GRN=''; YEL=''; BLD=''; DIM=''; RST=''; }
-say()  { printf '\n%s▸ %s%s\n' "$BLD" "$*" "$RST"; }
+RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'; CYA=$'\033[36m'
+BLD=$'\033[1m'; DIM=$'\033[2m'; RST=$'\033[0m'
+# Цвет — только для живого терминала. NO_COLOR — общее соглашение
+# (no-color.org), им пользуются, когда вывод уезжает в лог или в чужой парсер.
+if [[ ! -t 1 || -n "${NO_COLOR:-}" ]]; then
+    RED=''; GRN=''; YEL=''; CYA=''; BLD=''; DIM=''; RST=''
+fi
+say()  { printf '\n%s%s▸ %s%s\n' "$BLD" "$CYA" "$*" "$RST"; }
 ok()   { printf '%s✓%s %s\n' "$GRN" "$RST" "$*"; }
 warn() { printf '%s!%s %s\n' "$YEL" "$RST" "$*" >&2; }
 die()  { printf '%s✗%s %s\n' "$RED" "$RST" "$*" >&2; exit 1; }
+
+# Дополнение до ширины колонки. printf считает байты, а не знакоместа, и
+# кириллица разносила таблицу: «по таймеру» — 10 символов, но 19 байт, так
+# что %-9s не добивал пробелами вовсе. Считаем сами, выбрасывая продолжающие
+# байты UTF-8 (0x80–0xBF): что в юникодной локали, что в C остаётся ровно по
+# одному байту на символ.
+pad() {
+    local s="$1" w="$2" t="${1//[$'\x80'-$'\xbf']/}"
+    printf '%s%*s' "$s" "$(( w > ${#t} ? w - ${#t} : 0 ))" ''
+}
+
+# Значение переменной из файла описания цели.
+cfg_val() { grep -m1 "^$1=" "$2" 2>/dev/null | cut -d= -f2- | tr -d "\"'"; }
 
 KIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECTS_ROOT="${DK_ROOT:-$(dirname "$KIT_DIR")}"
@@ -67,12 +85,14 @@ current_project() {
 cmd_list() {
     say "Цели выкатки"
     local cur=""; cur="$(current_project 2>/dev/null || true)"
-    printf '%s  %-18s %-26s %s%s\n' "$DIM" "ЦЕЛЬ" "ПРОЕКТ" "ОПИСАНИЕ" "$RST"
+    printf '%s  %s %s %s%s\n' "$DIM" \
+        "$(pad ЦЕЛЬ 18)" "$(pad ПРОЕКТ 24)" "ОПИСАНИЕ" "$RST"
     discover | while IFS='|' read -r app dir file; do
         local mark="  "
         [[ -n "$cur" && "$dir" == "$cur" ]] && mark="${GRN}▸ ${RST}"
-        printf '%s%-18s %-24s %s
-' "$mark" "$app" "$(basename "$dir")" ".deploy-kit/$(basename "$file")"
+        printf '%s%s%s%s %s %s%s%s\n' "$mark" "$CYA" "$(pad "$app" 18)" "$RST" \
+            "$(pad "$(basename "$dir")" 24)" \
+            "$DIM" ".deploy-kit/$(basename "$file")" "$RST"
     done
     echo
     printf '%sСтрелка — цели проекта, в котором вы сейчас.%s\n' "$DIM" "$RST"
@@ -84,70 +104,185 @@ cmd_status() {
     # Список строится из тех же описаний целей, что и выкатка. Раньше здесь был
     # захардкоженный список пяти сайтов: он не знал ни про бота, ни про морду
     # админки, ни про мониторинг — то есть отвечал не на тот вопрос.
-    printf '%s  %-20s %-5s %-9s %s%s\n' "$DIM" "ЦЕЛЬ" "КОД" "ЮНИТ" "ВЕРСИЯ" "$RST"
+    printf '%s  %s %s %s %s%s\n' "$DIM" \
+        "$(pad ЦЕЛЬ 18)" "$(pad КОД 4)" "$(pad ЮНИТ 12)" "ВЕРСИЯ" "$RST"
 
-    # Состояние юнитов забираем одним заходом: отдельный ssh на каждый сервис
-    # превращает быструю команду в десять рукопожатий.
-    local units=""
-    if [[ -n "${DEPLOY_HOST:-}" && -n "${DEPLOY_KEY:-}" ]]; then
-        units="$(ssh -i "$DEPLOY_KEY" -o ConnectTimeout=8 -o BatchMode=yes \
+    local -a rows=()
+    mapfile -t rows < <(discover)
+
+    # Всё, что нужно с сервера, забираем одним заходом: отдельный ssh на
+    # каждый сервис превращает быструю команду в десять рукопожатий. Кроме
+    # состояния юнитов спрашиваем, куда указывает current у каждой цели —
+    # version.json раздают не все (у Go-сервисов и морды админки его нет),
+    # а симлинк есть всегда, и release.sh сверяется ровно с ним.
+    local units="" links="" remote="" line app dir file root
+    for line in "${rows[@]}"; do
+        IFS='|' read -r app dir file <<<"$line"
+        root="$(cfg_val ROOT "$file")"
+        [[ -n "$root" ]] || continue
+        remote+="l=\$(readlink -f $(printf '%q' "$root/current") 2>/dev/null);"
+        remote+=" [ -n \"\$l\" ] && printf '%s|%s\\n' $(printf '%q' "$app") \"\$(basename \"\$l\")\";"
+    done
+
+    # Без ответа сервера колонка ЮНИТ пуста, а версии остаются только у тех,
+    # кто раздаёт version.json. Молча показывать такую таблицу нельзя: она
+    # выглядит как «всё выяснили», а на деле половина данных не запрашивалась.
+    if [[ -z "${DEPLOY_HOST:-}" || -z "${DEPLOY_KEY:-}" ]]; then
+        warn "не заданы DEPLOY_HOST/DEPLOY_KEY: юниты и версии из симлинка недоступны (dk help)"
+    else
+        local out=""
+        out="$(ssh -i "$DEPLOY_KEY" -o ConnectTimeout=8 -o BatchMode=yes \
             "${DEPLOY_USER:-ubuntu}@$DEPLOY_HOST" \
-            "systemctl list-units --type=service --type=timer --all --no-legend --plain" 2>/dev/null || true)"
+            "systemctl list-units --type=service --type=timer --all --no-legend --plain; \
+             echo '#dk#'; $remote true" 2>/dev/null || true)"
+        if [[ "$out" == *'#dk#'* ]]; then
+            units="${out%%#dk#*}"
+            links="${out#*#dk#}"
+        else
+            warn "$DEPLOY_HOST не ответил по ssh: колонка ЮНИТ и версии из симлинка пусты"
+        fi
     fi
 
-    local line
-    while IFS= read -r line; do
-        # Каждая цель считается в подоболочке: отсутствие HEALTH или UNIT —
-        # нормальное состояние (у бота нет адреса, у сайта нет юнита) и не
-        # должно обрывать всю команду через set -e.
-        (
-            set +e
-            app="${line%%|*}"; rest="${line#*|}"; file="${rest#*|}"
-            val() { grep -m1 "^$1=" "$file" 2>/dev/null | cut -d= -f2- | tr -d "\"'"; }
+    # Цели опрашиваем разом: у каждой до двух curl по десять секунд таймаута,
+    # и последовательный обход превращал «быстро посмотреть прод» в полминуты
+    # ожидания. Каждая строка пишется в свой файл, печатаются они по порядку —
+    # параллельность не должна перетасовывать таблицу.
+    local tmp; tmp="$(mktemp -d)"
+    local i=0
+    for line in "${rows[@]}"; do
+        status_row "$line" "$tmp/$i" &
+        i=$(( i + 1 ))
+    done
+    wait
 
-            health="$(val HEALTH)"; vurl="$(val VERSION_URL)"; unit="$(val UNIT)"
+    local j bad=0 linked=0
+    for (( j = 0; j < i; j++ )); do
+        cat "$tmp/$j"
+        [[ -f "$tmp/$j.bad" ]]  && bad=$(( bad + 1 ))
+        [[ -f "$tmp/$j.link" ]] && linked=$(( linked + 1 ))
+    done
+    rm -rf "$tmp"
 
-            probe="$health"; [[ -z "$probe" ]] && probe="${vurl%/version.json}"
-            code="—"
-            [[ -n "$probe" ]] && code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$probe" 2>/dev/null || echo '---')"
-
-            ver="—"
-            if [[ -n "$vurl" ]]; then
-                v="$(curl -s --max-time 8 "$vurl" 2>/dev/null | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
-                [[ -n "$v" ]] && ver="$v"
-            fi
-
-            ustate="—"
-            timer=""
-            if [[ -n "$unit" ]]; then
-                ustate="$(awk -v u="$unit" '$1==u {print $4; exit}' <<<"$units")"
-                [[ -z "$ustate" ]] && ustate="нет"
-                # Сервис, который запускает таймер, между запусками мёртв по
-                # устройству. Красить его красным — учить не верить команде.
-                timer="$(awk -v u="${unit%.service}.timer" '$1==u {print $1; exit}' <<<"$units")"
-                [[ -n "$timer" && "$ustate" == "dead" ]] && ustate="по таймеру"
-                # Юнит-обёртка (Type=oneshot + RemainAfterExit) отработал и
-                # вышел, а поднятое им — работает: у мониторинга это compose
-                # со стеком контейнеров. В колонке SUB он навсегда «exited»,
-                # и без этой ветки исправный стек красился бы красным.
-                if [[ "$ustate" == "exited" ]] \
-                   && [[ "$(awk -v u="$unit" '$1==u {print $3; exit}' <<<"$units")" == "active" ]]; then
-                    ustate="поднят"
-                fi
-            fi
-
-            c="$GRN"
-            [[ "$code" == "200" || "$code" == "—" ]] || c="$RED"
-            [[ -n "$unit" && "$ustate" != "running" && "$ustate" != "по таймеру" && "$ustate" != "поднят" ]] && c="$RED"
-            printf '  %-20s %s%-5s%s %-9s %s\n' "$app" "$c" "$code" "$RST" "$ustate" "$ver"
-        )
-    done < <(discover)
+    echo
+    if (( linked )); then
+        printf '%sТусклая версия — из симлинка current: version.json цель не раздаёт.%s\n' \
+            "$DIM" "$RST"
+    fi
+    if (( bad )); then
+        warn "требуют внимания: $bad из $i"
+    else
+        ok "все цели в порядке: $i"
+    fi
 
     # Мониторинг раньше стоял здесь отдельной строкой с проверкой «отвечает
     # ли 401»: он жил контейнерами и катился руками, то есть целью выкатки не
     # был. Теперь у него есть .deploy-kit/prod.env, и он приходит из discover
     # наравне со всеми — со своим кодом ответа, юнитом и версией релиза.
     # Отдельная строка означала бы, что мониторинг показан дважды.
+}
+
+# Одна строка таблицы: status_row <строка discover> <файл вывода>.
+# Рядом с файлом кладёт метку .bad (цель нездорова) и .link (версию пришлось
+# брать из симлинка) — из фонового процесса иначе ничего не вернуть.
+# Значения units и links видны сюда из cmd_status по области видимости bash.
+status_row() {
+    # Отсутствие HEALTH или UNIT — нормальное состояние (у бота нет адреса,
+    # у сайта нет юнита), а не повод обрывать команду через set -e.
+    set +e
+    local line="$1" out="$2"
+    local app rest file health vurl unit probe code ver state ustate
+    local cc uc vc
+
+    app="${line%%|*}"; rest="${line#*|}"; file="${rest#*|}"
+
+    health="$(cfg_val HEALTH "$file")"
+    vurl="$(cfg_val VERSION_URL "$file")"
+    unit="$(cfg_val UNIT "$file")"
+
+    probe="$health"; [[ -z "$probe" ]] && probe="${vurl%/version.json}"
+    code="—"
+    if [[ -n "$probe" ]]; then
+        code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$probe" 2>/dev/null)"
+        # curl отдаёт 000, когда ответа не было вовсе: не дозвонились, таймаут,
+        # сломанный TLS. Три нуля в колонке «КОД» читаются как HTTP-код, а это
+        # не он — поэтому говорим словами.
+        [[ -z "$code" || "$code" == "000" ]] && code="нет"
+    fi
+
+    ver=""
+    if [[ -n "$vurl" ]]; then
+        ver="$(curl -s --max-time 8 "$vurl" 2>/dev/null | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+    fi
+    vc="$RST"
+    # Цели без version.json — не «без версии»: показываем релиз, на который
+    # смотрит current, как это делает шлюз в release.sh. Источник косвенный,
+    # поэтому такая версия печатается тускло.
+    if [[ -z "$ver" ]]; then
+        ver="$(awk -F'|' -v a="$app" '$1==a {print $2; exit}' <<<"$links")"
+        [[ -n "$ver" ]] && { vc="$DIM"; : > "$out.link"; }
+    fi
+    [[ -z "$ver" ]] && { ver="—"; vc="$DIM"; }
+
+    state=""
+    if [[ -n "$unit" ]]; then
+        state="$(awk -v u="$unit" '$1==u {print $4; exit}' <<<"$units")"
+        # Сервис, который запускает таймер, между запусками мёртв по
+        # устройству. Красить его красным — учить не верить команде.
+        if [[ "$state" == "dead" ]] \
+           && [[ -n "$(awk -v u="${unit%.service}.timer" '$1==u {print $1; exit}' <<<"$units")" ]]; then
+            state="timer"
+        fi
+        # Юнит-обёртка (Type=oneshot + RemainAfterExit) отработал и вышел,
+        # а поднятое им — работает: у мониторинга это compose со стеком
+        # контейнеров. В колонке SUB он навсегда «exited», и без этой ветки
+        # исправный стек красился бы красным.
+        if [[ "$state" == "exited" ]] \
+           && [[ "$(awk -v u="$unit" '$1==u {print $3; exit}' <<<"$units")" == "active" ]]; then
+            state="up"
+        fi
+        [[ -z "$state" ]] && state="none"
+    fi
+
+    # systemctl отвечает по-английски, таблица — русская. Раньше в одной
+    # колонке соседствовали «running» и «по таймеру».
+    case "$state" in
+        "")      ustate="—" ;;
+        none)    ustate="нет" ;;
+        running) ustate="работает" ;;
+        up)      ustate="поднят" ;;
+        timer)   ustate="по таймеру" ;;
+        dead)    ustate="остановлен" ;;
+        failed)  ustate="упал" ;;
+        exited)  ustate="вышел" ;;
+        *)       ustate="$state" ;;
+    esac
+
+    # Каждая колонка красится по своему поводу. Раньше состояние юнита
+    # перекрашивало код ответа, и «200» светилось красным без объяснений.
+    # Здоровье считаем флагами, а не сравнением цветов: при NO_COLOR все
+    # последовательности пусты и любое такое сравнение вырождается в истину.
+    local code_bad=0 unit_bad=0
+    case "$code" in
+        200) cc="$GRN" ;;
+        —)   cc="$DIM" ;;
+        *)   cc="$RED"; code_bad=1 ;;
+    esac
+    case "$state" in
+        "")               uc="$DIM" ;;
+        running|up|timer) uc="$GRN" ;;
+        *)                uc="$RED"; unit_bad=1 ;;
+    esac
+
+    local mark="$GRN✓$RST"
+    if (( code_bad || unit_bad )); then
+        mark="$RED✗$RST"
+        : > "$out.bad"
+    fi
+
+    printf '%s %s %s%s%s %s%s%s %s%s%s\n' "$mark" "$(pad "$app" 18)" \
+        "$cc" "$(pad "$code" 4)" "$RST" \
+        "$uc" "$(pad "$ustate" 12)" "$RST" \
+        "$vc" "$ver" "$RST" > "$out"
 }
 
 resolve() {
@@ -174,6 +309,14 @@ cmd_deploy() {
         esac
     done
 
+    # «--all и цель» — противоречие: раньше цель молча игнорировалась и уезжало
+    # всё хозяйство вместо одного сайта. Такую опечатку лучше не прощать.
+    (( all )) && (( ${#targets[@]} )) \
+        && die "--all и список целей несовместимы: выберите что-то одно"
+
+    [[ -x "$KIT_DIR/bin/deploy" ]] \
+        || die "не найден $KIT_DIR/bin/deploy — проверьте установку deploy-kit"
+
     local list=()
     if (( all )); then
         mapfile -t list < <(discover)
@@ -188,8 +331,11 @@ cmd_deploy() {
         (( ${#list[@]} )) || die "в $(basename "$cur") нет целей выкатки"
     fi
 
-    printf '\n%sБудет выкачено:%s\n' "$BLD" "$RST"
-    local e; for e in "${list[@]}"; do printf '  • %s\n' "${e%%|*}"; done
+    printf '\n%sБудет выкачено%s%s:%s\n' "$BLD" "$RST" \
+        "${dry:+$DIM (сухой прогон)$RST}" "$RST"
+    local e; for e in "${list[@]}"; do
+        printf '  %s•%s %s%s%s\n' "$DIM" "$RST" "$CYA" "${e%%|*}" "$RST"
+    done
 
     local failed=() done_=()
     for e in "${list[@]}"; do
@@ -230,8 +376,14 @@ cmd_rollback() {
     [[ -n "${HEALTH:-}" ]] && args+=(--health "$HEALTH")
     [[ "${NGINX_RELOAD:-0}" == "1" ]] && args+=(--nginx-reload)
 
+    # Хвост аргументов уезжает пользовательский (--to <версия>, --list), и
+    # квотировать его надо так же, как остальные: без %q версия с пробелом
+    # разъезжается на два аргумента уже на той стороне.
+    local extra=""
+    (( $# )) && extra="$(printf '%q ' "$@")"
+
     ssh -i "$key" "$user@$host" \
-        "sudo /opt/deploy-kit/rollback.sh $(printf '%q ' "${args[@]}") $*"
+        "sudo /opt/deploy-kit/rollback.sh $(printf '%q ' "${args[@]}")$extra"
 }
 
 cmd_help() {
