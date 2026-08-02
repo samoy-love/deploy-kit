@@ -36,6 +36,11 @@ on:
         required: false
         type: boolean
         default: false
+      allow-same-version:
+        description: 'Разрешить версию, которая уже на проде (перевыкатка после ручной порчи каталога)'
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   # Очередь на репозиторий. Очередь на весь хост держит flock в release.sh:
@@ -75,14 +80,17 @@ jobs:
             echo "neighbours=${NEIGHBOURS:-}"
             echo "nginx_reload=${NGINX_RELOAD:-0}"
             echo "nginx_dest=${NGINX_DEST:-}"
+            echo "write_version_file=${WRITE_VERSION_FILE:-1}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Версия релиза
         id: ver
         run: |
-          # Тег — если стоим ровно на нём; иначе дата и короткий коммит.
+          # Всё, что уехало отсюда, помечается release-: по имени релиза на
+          # сервере сразу видно, пайплайн его положил или человек руками.
+          # Тег, если стоим ровно на нём, — иначе дата и короткий коммит.
           V="$(git describe --tags --exact-match 2>/dev/null || true)"
-          [ -n "$V" ] || V="$(date -u '+%Y%m%d-%H%M%S')-$(git rev-parse --short HEAD)"
+          [ -n "$V" ] || V="release-$(date -u '+%Y%m%d-%H%M%S')-$(git rev-parse --short HEAD)"
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "Версия: $V"
 
@@ -105,7 +113,10 @@ jobs:
             echo "::warning::ci/nginx-check.sh недоступен (deploy-kit приватный) — ранняя проверка конфига пропущена, защита остаётся на стороне сервера"
           fi
 
+      # Цель с WRITE_VERSION_FILE=0 version.json не раздаёт — класть его в
+      # артефакт нечестно: шлюз бы сверял файл, до которого снаружи не дойти.
       - name: Отметить версию в сборке
+        if: steps.cfg.outputs.write_version_file != '0'
         run: |
           printf '{"version":"%s","commit":"%s","builtAt":"%s"}\n' \
             "${{ steps.ver.outputs.version }}" "$(git rev-parse --short HEAD)" \
@@ -171,10 +182,20 @@ jobs:
           [ -n "${{ steps.cfg.outputs.version_url }}" ] && ARGS="$ARGS --version-url '${{ steps.cfg.outputs.version_url }}'"
           [ -n "${{ steps.cfg.outputs.neighbours }}" ]  && ARGS="$ARGS --neighbours '${{ steps.cfg.outputs.neighbours }}'"
           [ "${{ steps.cfg.outputs.nginx_reload }}" = "1" ] && ARGS="$ARGS --nginx-reload"
+          [ "${{ steps.cfg.outputs.write_version_file }}" = "0" ] && ARGS="$ARGS --no-version-file"
+          ${{ inputs.allow-same-version && 'ARGS="$ARGS --allow-same-version"' || 'true' }}
           ${{ inputs.dry-run && 'ARGS="$ARGS --dry-run"' || 'true' }}
 
-          ssh -i ~/.ssh/deploy_key "$USER@$HOST" "sudo /opt/deploy-kit/release.sh $ARGS"
+          RC=0
+          ssh -i ~/.ssh/deploy_key "$USER@$HOST" "sudo /opt/deploy-kit/release.sh $ARGS" || RC=$?
           ssh -i ~/.ssh/deploy_key "$USER@$HOST" "rm -f '$REMOTE'" || true
+          # Код 3 — отказ версионного шлюза: прод не тронут. Отдельная
+          # формулировка нужна, чтобы в логе была причина, а не «job failed».
+          if [ "$RC" = "3" ]; then
+            echo "::error::версия ${{ steps.ver.outputs.version }} не прошла версионный шлюз (уже на проде, старше прода или несравнима). Прод не тронут. Осознанный повтор — запуск с allow-same-version"
+            exit 1
+          fi
+          [ "$RC" = "0" ] || exit "$RC"
 
       - name: Уведомить в Telegram
         if: always() && !inputs.dry-run

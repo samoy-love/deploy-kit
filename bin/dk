@@ -28,7 +28,13 @@ PROJECTS_ROOT="${DK_ROOT:-$(dirname "$KIT_DIR")}"
 # Настройки доступа. Файл необязателен: переменные окружения имеют приоритет,
 # поэтому в CI ничего лишнего не читается.
 CONF="${DK_CONF:-$HOME/.config/deploy-kit/dk.conf}"
-[[ -f "$CONF" ]] && { set -a; . "$CONF"; set +a; }
+# Путь к конфигу известен только в рантайме.
+if [[ -f "$CONF" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    . "$CONF"
+    set +a
+fi
 
 # ------------------------------------------------------------------ поиск целей
 #
@@ -104,11 +110,14 @@ resolve() {
 }
 
 cmd_deploy() {
-    local all=0 dry=() targets=()
+    local all=0 dry=() targets=() pass=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --all)     all=1; shift ;;
             --dry-run) dry=(--dry-run); shift ;;
+            # Обход версионного шлюза — решение осознанное, поэтому флаг
+            # доезжает до release.sh как есть, без переименований по дороге.
+            --allow-same-version) pass+=(--allow-same-version); shift ;;
             -*)        die "неизвестный флаг: $1" ;;
             *)         targets+=("$1"); shift ;;
         esac
@@ -135,7 +144,7 @@ cmd_deploy() {
     for e in "${list[@]}"; do
         IFS='|' read -r app dir file <<<"$e"
         say "$app"
-        if (cd "$dir" && "$KIT_DIR/bin/deploy" --config "$file" "${dry[@]}" < /dev/null); then
+        if (cd "$dir" && "$KIT_DIR/bin/deploy" --config "$file" "${dry[@]}" "${pass[@]}" < /dev/null); then
             done_+=("$app")
         else
             failed+=("$app")
@@ -156,7 +165,11 @@ cmd_rollback() {
     local e; e="$(resolve "$target")"
     IFS='|' read -r app dir file <<<"$e"
 
-    set -a; . "$file"; set +a
+    # Файл описания выбирает пользователь — путь известен только в рантайме.
+    set -a
+    # shellcheck disable=SC1090
+    . "$file"
+    set +a
     local host="${DEPLOY_HOST:?не задан DEPLOY_HOST}" user="${DEPLOY_USER:-ubuntu}"
     local key="${DEPLOY_KEY:-$HOME/.ssh/id_ed25519}"
 
@@ -182,6 +195,8 @@ dk — выкатка проектов samoy.love одной командой
   dk deploy <цель> [<цель>…]  выборочно
   dk deploy --all             все цели всех проектов
   dk deploy --dry-run         показать план, ничего не менять
+  dk deploy --allow-same-version
+                              разрешить повтор уже выкаченной версии
   dk rollback <цель>          откатить на предыдущий релиз
   dk rollback <цель> --list   какие релизы есть на сервере
   dk rollback <цель> --to X   откатить на конкретный релиз

@@ -1,0 +1,85 @@
+name: CI
+
+# Инструмент, который гейтит выкатку всех остальных проектов, до сих пор сам
+# ничем не проверялся. Ошибка здесь ломает релизы во всех репозиториях сразу,
+# поэтому набор проверок здесь строже, чем у обычного проекта.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shell:
+    name: Скрипты
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Синтаксис отдельно от статического анализа: разобранный скрипт с
+      # претензиями shellcheck починить можно, а неразбираемый — уже нет.
+      - name: Синтаксис
+        run: |
+          fail=0
+          for f in server/*.sh ci/*.sh bin/deploy bin/dk; do
+            [ -f "$f" ] || continue
+            if bash -n "$f"; then
+              echo "ok   $f"
+            else
+              echo "::error file=$f::скрипт не разбирается"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          # -x: скрипты подключают lib.sh, без этого проверка слепа к общим функциям.
+          shellcheck -x -S warning server/*.sh ci/*.sh bin/deploy bin/dk
+
+      # Справка — часть контракта: dk help читают чаще, чем исходники.
+      - name: dk help не падает
+        run: bash bin/dk help > /dev/null
+
+  nginx:
+    name: Конфигурация nginx
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Настоящий nginx той же версии, что на проде: 1.24 не знает директивы
+      # `http2 on`, и конфиг, валидный для свежего nginx, там просто не встанет.
+      - name: Проверить конфиги настоящим nginx
+        run: |
+          fail=0
+          for conf in nginx/sites/*.conf; do
+            echo "::group::$conf"
+            if bash ci/nginx-check.sh "$conf"; then
+              echo "ok"
+            else
+              echo "::error file=$conf::nginx не принял конфиг"
+              fail=1
+            fi
+            echo '::endgroup::'
+          done
+          exit $fail
+
+  workflows:
+    name: Переиспользуемые workflow
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: actionlint
+        run: |
+          bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color

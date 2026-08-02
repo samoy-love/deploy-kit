@@ -36,6 +36,11 @@ on:
         required: false
         type: boolean
         default: false
+      allow-same-version:
+        description: 'Разрешить версию, которая уже на проде (перевыкатка после ручной порчи каталога)'
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: deploy-${{ github.repository }}
@@ -71,6 +76,7 @@ jobs:
             echo "version_url=${VERSION_URL:-}"
             echo "neighbours=${NEIGHBOURS:-}"
             echo "goarch=${GOARCH:-arm64}"
+            echo "write_version_file=${WRITE_VERSION_FILE:-1}"
           } >> "$GITHUB_OUTPUT"
           # BUILD_CMD через outputs НЕ передаём: внутри него есть свои кавычки
           # (-ldflags "-s -w -X ..."), и любая повторная подстановка рвёт
@@ -79,8 +85,9 @@ jobs:
       - name: Версия релиза
         id: ver
         run: |
+          # Префикс release- отличает выкатку из пайплайна от ручной (manual-).
           V="$(git describe --tags --exact-match 2>/dev/null || true)"
-          [ -n "$V" ] || V="$(date -u '+%Y%m%d-%H%M%S')-$(git rev-parse --short HEAD)"
+          [ -n "$V" ] || V="release-$(date -u '+%Y%m%d-%H%M%S')-$(git rev-parse --short HEAD)"
           echo "version=$V" >> "$GITHUB_OUTPUT"
 
       # Регресс идёт под архитектурой раннера — тесты должны выполняться,
@@ -108,7 +115,10 @@ jobs:
           [ -n "$(ls -A "$D")" ] || { echo "::error::каталог $D пуст — сборка ничего не создала"; exit 1; }
           echo "Собрано:"; ls -la "$D"
 
+      # Цель с WRITE_VERSION_FILE=0 version.json не раздаёт — класть его в
+      # артефакт нечестно: шлюз бы сверял файл, до которого снаружи не дойти.
       - name: Отметить версию
+        if: steps.cfg.outputs.write_version_file != '0'
         run: |
           D="${{ steps.cfg.outputs.artifact_dir }}"
           # Кладём в public/, если он есть: тогда версия доступна по /version.json
@@ -166,6 +176,8 @@ jobs:
           [ -n "${{ steps.cfg.outputs.health }}" ]      && ARGS="$ARGS --health '${{ steps.cfg.outputs.health }}'"
           [ -n "${{ steps.cfg.outputs.version_url }}" ] && ARGS="$ARGS --version-url '${{ steps.cfg.outputs.version_url }}'"
           [ -n "${{ steps.cfg.outputs.neighbours }}" ]  && ARGS="$ARGS --neighbours '${{ steps.cfg.outputs.neighbours }}'"
+          [ "${{ steps.cfg.outputs.write_version_file }}" = "0" ] && ARGS="$ARGS --no-version-file"
+          ${{ inputs.allow-same-version && 'ARGS="$ARGS --allow-same-version"' || 'true' }}
           ${{ inputs.dry-run && 'ARGS="$ARGS --dry-run"' || 'true' }}
 
           # Выкатка запускается transient-юнитом, а не просто командой по SSH.
@@ -174,13 +186,21 @@ jobs:
           # ровно там, где автооткат ещё не отработал, и прод остался бы на
           # непроверенном релизе. systemd-run переживает разрыв.
           CMD="sudo /opt/deploy-kit/release.sh $ARGS"
+          RC=0
           ssh -i ~/.ssh/deploy_key "$USER@$HOST" "
             if command -v systemd-run >/dev/null 2>&1; then
               sudo systemd-run --wait --collect --quiet --pipe --unit=deploy-${{ steps.cfg.outputs.app }}-$$ $CMD
             else
               $CMD
-            fi"
+            fi" || RC=$?
           ssh -i ~/.ssh/deploy_key "$USER@$HOST" "rm -f '$REMOTE'" || true
+          # Код 3 — отказ версионного шлюза: прод не тронут. Отдельная
+          # формулировка нужна, чтобы в логе была причина, а не «job failed».
+          if [ "$RC" = "3" ]; then
+            echo "::error::версия ${{ steps.ver.outputs.version }} не прошла версионный шлюз (уже на проде, старше прода или несравнима). Прод не тронут. Осознанный повтор — запуск с allow-same-version"
+            exit 1
+          fi
+          [ "$RC" = "0" ] || exit "$RC"
 
       - name: Уведомить в Telegram
         if: always() && !inputs.dry-run
