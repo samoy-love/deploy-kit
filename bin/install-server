@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
-# Обновление серверной части deploy-kit: скриптов в /opt/deploy-kit и общих
-# сниппетов nginx в /etc/nginx/snippets.
+# Обновление серверной части deploy-kit: скриптов в /opt/deploy-kit, общих
+# сниппетов nginx в /etc/nginx/snippets, файлов уровня http в /etc/nginx/conf.d
+# и — только по явному флагу — правила sudo в /etc/sudoers.d.
 #
-#   install-server            показать расхождения, ничего не менять
-#   install-server --apply    выложить из репозитория на сервер
+#   install-server                          показать расхождения, ничего не менять
+#   install-server --apply                  выложить из репозитория на сервер
+#   install-server --apply --with-sudoers   заодно /etc/sudoers.d/deploy-kit
+#
+# --with-sudoers отделён намеренно: он меняет ПРАВА на хосте, а не код
+# пайплайна, и применяется в рамках ручной миграции на отдельного пользователя
+# CI. См. шапку server/sudoers.d/deploy-kit.
 #
 # ЗАЧЕМ ОТДЕЛЬНАЯ КОМАНДА. Всё остальное хозяйство катится пайплайном, а сами
 # скрипты пайплайна до сих пор клали руками. Расхождение репозитория и сервера
@@ -33,8 +39,15 @@ if [[ -f "$CONF" ]]; then
 fi
 
 APPLY=0
-[[ "${1:-}" == "--apply" ]] && APPLY=1
-[[ -n "${1:-}" && "${1:-}" != "--apply" ]] && die "неизвестный аргумент: $1 (см. шапку файла)"
+WITH_SUDOERS=0
+while (( $# )); do
+    case "$1" in
+        --apply)        APPLY=1 ;;
+        --with-sudoers) WITH_SUDOERS=1 ;;
+        *)              die "неизвестный аргумент: $1 (см. шапку файла)" ;;
+    esac
+    shift
+done
 
 DEPLOY_HOST="${DEPLOY_HOST:?нет DEPLOY_HOST}"
 DEPLOY_USER="${DEPLOY_USER:-ubuntu}"
@@ -53,6 +66,20 @@ SNIPPETS=()
 while IFS= read -r s; do SNIPPETS+=("$(basename "$s")"); done \
     < <(find "$KIT_DIR/nginx/snippets" -maxdepth 1 -name 'samoylove-*.conf' | sort)
 
+# conf.d — по той же причине, что и сниппеты, но на уровень выше: nginx.conf
+# подключает этот каталог целиком, поэтому здесь живёт то, что обязано
+# действовать на весь хост, а не на отдельный server-блок (log_format,
+# server_tokens). Владельца-проекта у таких файлов тем более нет.
+CONFD=()
+while IFS= read -r c; do CONFD+=("$(basename "$c")"); done \
+    < <(find "$KIT_DIR/nginx/conf.d" -maxdepth 1 -name 'samoylove-*.conf' | sort)
+
+# Правило sudo для учётки CI. Едет только по явному --with-sudoers: оно меняет
+# ПРАВА на хосте, а не код пайплайна, и применяется в рамках ручной миграции на
+# отдельного пользователя. Подробности и порядок шагов — в шапке самого файла.
+SUDOERS_SRC="$KIT_DIR/server/sudoers.d/deploy-kit"
+SUDOERS_DEST="/etc/sudoers.d/deploy-kit"
+
 # На сервере обязана оказаться версия, прошедшая ревью и CI, а не та, что
 # случайно лежит в рабочей копии. Проверка не теоретическая: выкладка уже
 # один раз увезла на прод недоделанный nginx-apply.sh с чужой ветки — просто
@@ -62,6 +89,8 @@ if [[ "${SKIP_BRANCH_CHECK:-0}" != "1" ]]; then
     CHECK=()
     for f in "${FILES[@]}";    do CHECK+=("server/$f"); done
     for s in "${SNIPPETS[@]}"; do CHECK+=("nginx/snippets/$s"); done
+    for c in "${CONFD[@]}";    do CHECK+=("nginx/conf.d/$c"); done
+    (( WITH_SUDOERS )) && CHECK+=("server/sudoers.d/deploy-kit")
     for p in "${CHECK[@]}"; do
         if ! git -C "$KIT_DIR" diff --quiet origin/main -- "$p" 2>/dev/null; then
             die "$p в рабочей копии отличается от origin/main.
@@ -104,7 +133,42 @@ for s in "${SNIPPETS[@]}"; do
     fi
 done
 
-if (( ${#drift[@]} == 0 && ${#sdrift[@]} == 0 )); then
+printf '\n%sЧто на сервере /etc/nginx/conf.d:%s\n' "$BLD" "$RST"
+cdrift=()
+for c in "${CONFD[@]}"; do
+    lh="$(tr -d '\r' < "$KIT_DIR/nginx/conf.d/$c" | sha256sum | cut -c1-12)"
+    rh="$("${SSH[@]}" "sudo tr -d '\r' < '/etc/nginx/conf.d/$c' 2>/dev/null | sha256sum | cut -c1-12" || true)"
+    if [[ -z "$rh" || "$rh" == *"d41d8cd98f00"* ]]; then
+        printf '  %-34s %sнет на сервере%s\n' "$c" "$YEL" "$RST"; cdrift+=("$c")
+    elif [[ "$lh" == "$rh" ]]; then
+        printf '  %-34s %sсовпадает%s\n' "$c" "$DIM" "$RST"
+    else
+        printf '  %-34s %sразошлось%s (сервер %s, репозиторий %s)\n' "$c" "$RED" "$RST" "$rh" "$lh"
+        cdrift+=("$c")
+    fi
+done
+
+sudoers_drift=0
+if (( WITH_SUDOERS )); then
+    [[ -f "$SUDOERS_SRC" ]] || die "нет $SUDOERS_SRC"
+    printf '\n%sЧто на сервере /etc/sudoers.d:%s\n' "$BLD" "$RST"
+    lh="$(tr -d '\r' < "$SUDOERS_SRC" | sha256sum | cut -c1-12)"
+    # `sudo cat`, а не `sudo tr < файл`: перенаправление выполняет шелл
+    # ВЫЗЫВАЮЩЕГО, то есть до sudo, и на файле 0440 root:root оно падает с
+    # permission denied. Хеш считался бы от пустого ввода, и «совпадает» не
+    # наступало бы никогда — проверка молча всегда показывала бы расхождение.
+    rh="$("${SSH[@]}" "sudo test -f '$SUDOERS_DEST' && sudo cat '$SUDOERS_DEST' | tr -d '\r' | sha256sum | cut -c1-12" 2>/dev/null || true)"
+    if [[ -z "$rh" ]]; then
+        printf '  %-34s %sнет на сервере%s\n' "deploy-kit" "$YEL" "$RST"; sudoers_drift=1
+    elif [[ "$lh" == "$rh" ]]; then
+        printf '  %-34s %sсовпадает%s\n' "deploy-kit" "$DIM" "$RST"
+    else
+        printf '  %-34s %sразошлось%s (сервер %s, репозиторий %s)\n' "deploy-kit" "$RED" "$RST" "$rh" "$lh"
+        sudoers_drift=1
+    fi
+fi
+
+if (( ${#drift[@]} == 0 && ${#sdrift[@]} == 0 && ${#cdrift[@]} == 0 && sudoers_drift == 0 )); then
     echo; ok "сервер и репозиторий совпадают"
     exit 0
 fi
@@ -113,7 +177,10 @@ if ! (( APPLY )); then
     echo
     if (( ${#drift[@]}  )); then warn "расходятся скрипты: ${drift[*]}"; fi
     if (( ${#sdrift[@]} )); then warn "расходятся сниппеты: ${sdrift[*]}"; fi
-    printf '%sВыложить: install-server --apply%s\n' "$DIM" "$RST"
+    if (( ${#cdrift[@]} )); then warn "расходятся conf.d: ${cdrift[*]}"; fi
+    if (( sudoers_drift  )); then warn "расходится sudoers.d/deploy-kit"; fi
+    printf '%sВыложить: install-server --apply%s%s\n' "$DIM" \
+        "$( (( WITH_SUDOERS )) && printf ' --with-sudoers' )" "$RST"
     exit 1
 fi
 
@@ -158,3 +225,49 @@ for s in "${sdrift[@]}"; do
         exit \$rc" || die "сниппет $s не встал — nginx-apply.sh откатил изменения"
 done
 if (( ${#sdrift[@]} )); then ok "сниппеты выложены: ${sdrift[*]}"; fi
+
+# conf.d — тоже через nginx-apply.sh, но БЕЗ --enable: nginx.conf подключает
+# каталог целиком, симлинкать нечего (сам nginx-apply.sh на --enable для
+# conf.d ругается и выходит). Проверка та же: бэкап, nginx -t, откат.
+for c in "${cdrift[@]}"; do
+    "${SCP[@]}" "$KIT_DIR/nginx/conf.d/$c" "$DEPLOY_USER@$DEPLOY_HOST:/tmp/$c"
+    "${SSH[@]}" "sed -i 's/\r\$//' '/tmp/$c'
+        sudo $DEST/nginx-apply.sh --app deploy-kit --conf '/tmp/$c' \
+             --dest '/etc/nginx/conf.d/$c'
+        rc=\$?
+        rm -f '/tmp/$c'
+        exit \$rc" || die "conf.d/$c не встал — nginx-apply.sh откатил изменения"
+done
+if (( ${#cdrift[@]} )); then ok "conf.d выложены: ${cdrift[*]}"; fi
+
+# Правило sudo. Порядок здесь важнее, чем везде выше: невалидный файл в
+# /etc/sudoers.d ломает sudo ЦЕЛИКОМ, а чинить его без sudo уже нечем — root
+# по ключу на этом хосте не пускает, и остаётся только консоль облака.
+#
+# Поэтому: visudo на отдельном файле в /tmp, затем установка, затем visudo на
+# ВСЕЙ конфигурации — и снос файла, если она не прошла. Проверять только файл
+# недостаточно: он бывает валиден сам по себе и конфликтует с уже лежащим.
+if (( WITH_SUDOERS && sudoers_drift )); then
+    S_STAGE="/tmp/deploy-kit-sudoers-$$"
+    "${SCP[@]}" "$SUDOERS_SRC" "$DEPLOY_USER@$DEPLOY_HOST:$S_STAGE"
+    "${SSH[@]}" "set -e
+        sed -i 's/\r\$//' '$S_STAGE'
+        sudo visudo -cf '$S_STAGE' >/dev/null || { echo 'файл не проходит visudo — ничего не меняю'; rm -f '$S_STAGE'; exit 1; }
+        sudo install -o root -g root -m 0440 '$S_STAGE' '$SUDOERS_DEST'
+        rm -f '$S_STAGE'
+        if ! sudo visudo -c >/dev/null; then
+            sudo rm -f '$SUDOERS_DEST'
+            echo 'конфигурация sudo в целом не проходит проверку — файл удалён, права не тронуты'
+            exit 1
+        fi" || die "sudoers не выложен — права на сервере остались прежними"
+    ok "выложено: $SUDOERS_DEST"
+
+    # Пока широкое правило на месте, узкое не сужает НИЧЕГО: sudo применяет
+    # последнее совпавшее. Молчать об этом нельзя — файл лёг, выглядит как
+    # сделанная работа, а прав не убавилось.
+    if "${SSH[@]}" "sudo grep -qE '^[[:space:]]*ubuntu[[:space:]]+ALL=\(ALL\)[[:space:]]+NOPASSWD:ALL' /etc/sudoers.d/90-cloud-init-users 2>/dev/null"; then
+        warn "правило лежит, но прав НЕ сужает: в /etc/sudoers.d/90-cloud-init-users
+   всё ещё \`ubuntu ALL=(ALL) NOPASSWD:ALL\`. Порядок миграции — в шапке
+   server/sudoers.d/deploy-kit; шаг с удалением этой строки делается руками."
+    fi
+fi
