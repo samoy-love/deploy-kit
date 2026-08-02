@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# Локальная выкатка — то же самое, что делает CI, но со своей машины.
+#
+#   deploy --config .deploy-kit/prod.env            # собрать и выкатить
+#   deploy --config .deploy-kit/prod.env --dry-run  # показать план
+#   deploy --config .deploy-kit/prod.env --no-build # выкатить уже собранное
+#
+# Принципиально: CI и этот скрипт читают ОДИН и тот же файл-описание проекта
+# и вызывают ОДИН и тот же release.sh на сервере. Иначе «локально катится, а
+# в CI нет» — вопрос времени.
+#
+# Файл-описание (.deploy-kit/prod.env в репозитории проекта):
+#
+#   APP=samoy-love                 имя приложения (каталог на сервере)
+#   BUILD_CMD="npm ci && npm run build"
+#   ARTIFACT_DIR=dist              что паковать
+#   ROOT=/var/www/samoy.love       корень с releases/ и current
+#   OWNER=ubuntu:ubuntu            владелец файлов релиза
+#   NGINX_RELOAD=1                 перезагрузить nginx после переключения
+#   UNIT=                          systemd-юнит для сервисов
+#   HEALTH=https://samoy.love/
+#   VERSION_URL=https://samoy.love/version.json
+#   NEIGHBOURS=metro.samoy.love,snakes.samoy.love
+#
+# Хост и ключ берутся из окружения или из того же файла:
+#   DEPLOY_HOST, DEPLOY_USER, DEPLOY_KEY
+
+set -Eeuo pipefail
+
+RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'; DIM=$'\033[2m'; RST=$'\033[0m'
+[[ -t 1 ]] || { RED=''; GRN=''; YEL=''; DIM=''; RST=''; }
+log()  { printf '%s[%s]%s %s\n' "$DIM" "$(date -u '+%H:%M:%S')" "$RST" "$*"; }
+ok()   { printf '%s✓%s %s\n' "$GRN" "$RST" "$*"; }
+warn() { printf '%s!%s %s\n' "$YEL" "$RST" "$*" >&2; }
+die()  { printf '%s✗%s %s\n' "$RED" "$RST" "$*" >&2; exit 1; }
+
+CONFIG=""; DRY=0; BUILD=1
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --config)   CONFIG="$2"; shift 2 ;;
+        --dry-run)  DRY=1; shift ;;
+        --no-build) BUILD=0; shift ;;
+        -h|--help)  sed -n '2,30p' "$0"; exit 0 ;;
+        *) die "неизвестный аргумент: $1" ;;
+    esac
+done
+[[ -n "$CONFIG" ]] || die "нужен --config (например .deploy-kit/prod.env)"
+[[ -f "$CONFIG" ]] || die "файл описания не найден: $CONFIG"
+
+# shellcheck disable=SC1090
+source "$CONFIG"
+
+: "${APP:?в описании нет APP}"
+: "${ARTIFACT_DIR:?в описании нет ARTIFACT_DIR}"
+: "${ROOT:?в описании нет ROOT}"
+DEPLOY_HOST="${DEPLOY_HOST:?нет DEPLOY_HOST}"
+DEPLOY_USER="${DEPLOY_USER:-ubuntu}"
+DEPLOY_KEY="${DEPLOY_KEY:-$HOME/.ssh/id_ed25519}"
+KEEP="${KEEP:-5}"
+
+SSH=(ssh -i "$DEPLOY_KEY" -o StrictHostKeyChecking=yes "$DEPLOY_USER@$DEPLOY_HOST")
+SCP=(scp -i "$DEPLOY_KEY" -o StrictHostKeyChecking=yes)
+
+# Версия: тег, если стоим ровно на нём, иначе дата и короткий коммит.
+# Локальная выкатка из грязного дерева помечается суффиксом -dirty —
+# чтобы на статус-странице было видно, что уехало не из репозитория.
+if git rev-parse --git-dir >/dev/null 2>&1; then
+    VERSION="$(git describe --tags --exact-match 2>/dev/null || true)"
+    [[ -z "$VERSION" ]] && VERSION="$(date -u '+%Y%m%d-%H%M%S')-$(git rev-parse --short HEAD)"
+    [[ -n "$(git status --porcelain)" ]] && VERSION="${VERSION}-dirty"
+else
+    VERSION="$(date -u '+%Y%m%d-%H%M%S')-local"
+fi
+
+echo "приложение:  $APP"
+echo "версия:      $VERSION"
+echo "сервер:      $DEPLOY_USER@$DEPLOY_HOST"
+echo "каталог:     $ROOT"
+
+# --- сборка ---------------------------------------------------------------
+if (( BUILD )) && [[ -n "${BUILD_CMD:-}" ]]; then
+    log "сборка: $BUILD_CMD"
+    if (( DRY )); then
+        echo "  (dry-run: пропускаю)"
+    else
+        bash -c "$BUILD_CMD" || die "сборка провалилась"
+        ok "собрано"
+    fi
+fi
+[[ -d "$ARTIFACT_DIR" ]] || die "нет каталога $ARTIFACT_DIR — сборка не выполнялась?"
+
+# --- отметка версии -------------------------------------------------------
+# Кладём version.json прямо в артефакт: по нему выкатка себя проверяет, и его
+# же читает агент статус-страницы.
+if [[ "${WRITE_VERSION_FILE:-1}" == "1" ]] && ! (( DRY )); then
+    printf '{"version":"%s","commit":"%s","builtAt":"%s"}\n' \
+        "$VERSION" "$(git rev-parse --short HEAD 2>/dev/null || echo local)" \
+        "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$ARTIFACT_DIR/version.json"
+    ok "version.json записан"
+fi
+
+# --- упаковка -------------------------------------------------------------
+TARBALL="$(mktemp -t "${APP}-XXXXXX").tar.gz"
+trap 'rm -f "$TARBALL"' EXIT
+if (( DRY )); then
+    log "упаковка пропущена (dry-run)"
+else
+    tar -czf "$TARBALL" -C "$ARTIFACT_DIR" .
+    ok "артефакт: $(du -h "$TARBALL" | cut -f1)"
+fi
+
+# --- предусловия ----------------------------------------------------------
+log "проверяю предусловия на сервере"
+"${SSH[@]}" "sudo /opt/deploy-kit/preflight.sh --app '$APP' --root '$ROOT' ${UNIT:+--units '$UNIT'}" \
+    || die "предусловия не выполнены — выкатка не начата"
+
+# --- выкатка --------------------------------------------------------------
+REMOTE_ARCHIVE="/tmp/${APP}-${VERSION}.tar.gz"
+ARGS=(--app "$APP" --version "$VERSION" --archive "$REMOTE_ARCHIVE" --root "$ROOT" --keep "$KEEP")
+[[ -n "${UNIT:-}" ]]        && ARGS+=(--unit "$UNIT")
+[[ -n "${HEALTH:-}" ]]      && ARGS+=(--health "$HEALTH")
+[[ -n "${VERSION_URL:-}" ]] && ARGS+=(--version-url "$VERSION_URL")
+[[ -n "${NEIGHBOURS:-}" ]]  && ARGS+=(--neighbours "$NEIGHBOURS")
+[[ -n "${OWNER:-}" ]]       && ARGS+=(--owner "$OWNER")
+[[ "${NGINX_RELOAD:-0}" == "1" ]] && ARGS+=(--nginx-reload)
+(( DRY )) && ARGS+=(--dry-run)
+
+if ! (( DRY )); then
+    log "загружаю артефакт"
+    "${SCP[@]}" "$TARBALL" "$DEPLOY_USER@$DEPLOY_HOST:$REMOTE_ARCHIVE"
+fi
+
+log "запускаю выкатку на сервере"
+"${SSH[@]}" "sudo /opt/deploy-kit/release.sh $(printf '%q ' "${ARGS[@]}")" || die "выкатка провалена"
+
+(( DRY )) || "${SSH[@]}" "rm -f '$REMOTE_ARCHIVE'"
+
+ok "готово: $APP $VERSION"
