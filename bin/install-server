@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Обновление серверной части deploy-kit — скриптов в /opt/deploy-kit.
+# Обновление серверной части deploy-kit: скриптов в /opt/deploy-kit и общих
+# сниппетов nginx в /etc/nginx/snippets.
 #
 #   install-server            показать расхождения, ничего не менять
-#   install-server --apply    выложить скрипты из репозитория на сервер
+#   install-server --apply    выложить из репозитория на сервер
 #
 # ЗАЧЕМ ОТДЕЛЬНАЯ КОМАНДА. Всё остальное хозяйство катится пайплайном, а сами
 # скрипты пайплайна до сих пор клали руками. Расхождение репозитория и сервера
@@ -43,15 +44,27 @@ SCP=(scp -i "$DEPLOY_KEY" -o StrictHostKeyChecking=yes)
 
 FILES=(lib.sh release.sh rollback.sh preflight.sh nginx-apply.sh)
 
+# Общие сниппеты nginx возит эта же команда, и ровно по той же причине, что и
+# скрипты: у них нет проекта-владельца, а значит нет и пайплайна, который бы
+# их выкладывал. Пока их нечем было увезти, сайт, подключающий новый сниппет,
+# не проходил на сервере nginx -t — и его выкатка откатывалась по причине,
+# которой в самом сайте нет.
+SNIPPETS=()
+while IFS= read -r s; do SNIPPETS+=("$(basename "$s")"); done \
+    < <(find "$KIT_DIR/nginx/snippets" -maxdepth 1 -name 'samoylove-*.conf' | sort)
+
 # На сервере обязана оказаться версия, прошедшая ревью и CI, а не та, что
 # случайно лежит в рабочей копии. Проверка не теоретическая: выкладка уже
 # один раз увезла на прод недоделанный nginx-apply.sh с чужой ветки — просто
 # потому, что каталог был переключён на неё.
 if [[ "${SKIP_BRANCH_CHECK:-0}" != "1" ]]; then
     git -C "$KIT_DIR" fetch -q origin main 2>/dev/null || true
-    for f in "${FILES[@]}"; do
-        if ! git -C "$KIT_DIR" diff --quiet origin/main -- "server/$f" 2>/dev/null; then
-            die "server/$f в рабочей копии отличается от origin/main.
+    CHECK=()
+    for f in "${FILES[@]}";    do CHECK+=("server/$f"); done
+    for s in "${SNIPPETS[@]}"; do CHECK+=("nginx/snippets/$s"); done
+    for p in "${CHECK[@]}"; do
+        if ! git -C "$KIT_DIR" diff --quiet origin/main -- "$p" 2>/dev/null; then
+            die "$p в рабочей копии отличается от origin/main.
    Выкладывать можно только влитое: влейте изменения либо возьмите чистую
    копию main. Осознанный обход: SKIP_BRANCH_CHECK=1"
         fi
@@ -76,37 +89,72 @@ for f in "${FILES[@]}"; do
     fi
 done
 
-if (( ${#drift[@]} == 0 )); then
+printf '\n%sЧто на сервере /etc/nginx/snippets:%s\n' "$BLD" "$RST"
+sdrift=()
+for s in "${SNIPPETS[@]}"; do
+    lh="$(tr -d '\r' < "$KIT_DIR/nginx/snippets/$s" | sha256sum | cut -c1-12)"
+    rh="$("${SSH[@]}" "sudo tr -d '\r' < '/etc/nginx/snippets/$s' 2>/dev/null | sha256sum | cut -c1-12" || true)"
+    if [[ -z "$rh" || "$rh" == *"d41d8cd98f00"* ]]; then
+        printf '  %-34s %sнет на сервере%s\n' "$s" "$YEL" "$RST"; sdrift+=("$s")
+    elif [[ "$lh" == "$rh" ]]; then
+        printf '  %-34s %sсовпадает%s\n' "$s" "$DIM" "$RST"
+    else
+        printf '  %-34s %sразошлось%s (сервер %s, репозиторий %s)\n' "$s" "$RED" "$RST" "$rh" "$lh"
+        sdrift+=("$s")
+    fi
+done
+
+if (( ${#drift[@]} == 0 && ${#sdrift[@]} == 0 )); then
     echo; ok "сервер и репозиторий совпадают"
     exit 0
 fi
 
 if ! (( APPLY )); then
     echo
-    warn "расходится: ${drift[*]}"
+    if (( ${#drift[@]}  )); then warn "расходятся скрипты: ${drift[*]}"; fi
+    if (( ${#sdrift[@]} )); then warn "расходятся сниппеты: ${sdrift[*]}"; fi
     printf '%sВыложить: install-server --apply%s\n' "$DIM" "$RST"
     exit 1
 fi
 
-# Заливаем во временный каталог и проверяем синтаксис ИМЕННО там: сломанный
-# release.sh на месте означает, что выкатиться и откатиться уже нечем.
-STAGE="/tmp/deploy-kit-stage-$$"
-"${SSH[@]}" "rm -rf '$STAGE' && mkdir -p '$STAGE'"
-for f in "${FILES[@]}"; do
-    "${SCP[@]}" "$KIT_DIR/server/$f" "$DEPLOY_USER@$DEPLOY_HOST:$STAGE/$f"
-done
-
-"${SSH[@]}" "set -e
-    for f in ${FILES[*]}; do
-        sed -i 's/\r$//' '$STAGE'/\$f
-        bash -n '$STAGE'/\$f || { echo \"\$f не разбирается — ничего не меняю\"; exit 1; }
+# Скрипты идут ПЕРЕД сниппетами: сниппеты ставит nginx-apply.sh на сервере, и
+# к этому моменту он обязан быть свежим — поддержка каталога snippets появилась
+# в нём самом, на старой версии следующий шаг просто откажется работать.
+if (( ${#drift[@]} )); then
+    # Заливаем во временный каталог и проверяем синтаксис ИМЕННО там: сломанный
+    # release.sh на месте означает, что выкатиться и откатиться уже нечем.
+    STAGE="/tmp/deploy-kit-stage-$$"
+    "${SSH[@]}" "rm -rf '$STAGE' && mkdir -p '$STAGE'"
+    for f in "${FILES[@]}"; do
+        "${SCP[@]}" "$KIT_DIR/server/$f" "$DEPLOY_USER@$DEPLOY_HOST:$STAGE/$f"
     done
-    sudo install -o root -g root -m 0755 '$STAGE'/*.sh '$DEST'/
-    rm -rf '$STAGE'" || die "выкладка не прошла — на сервере осталась прежняя версия"
 
-ok "выложено: ${drift[*]}"
+    "${SSH[@]}" "set -e
+        for f in ${FILES[*]}; do
+            sed -i 's/\r$//' '$STAGE'/\$f
+            bash -n '$STAGE'/\$f || { echo \"\$f не разбирается — ничего не меняю\"; exit 1; }
+        done
+        sudo install -o root -g root -m 0755 '$STAGE'/*.sh '$DEST'/
+        rm -rf '$STAGE'" || die "выкладка не прошла — на сервере осталась прежняя версия"
 
-# Проверяем, что выложенное действительно работает: битый скрипт обнаруживается
-# сейчас, а не в момент, когда им попытаются что-то выкатить.
-"${SSH[@]}" "sudo $DEST/release.sh --help >/dev/null 2>&1 || sudo bash -n $DEST/release.sh" \
-    && ok "release.sh на сервере исполняем"
+    ok "выложено: ${drift[*]}"
+
+    # Проверяем, что выложенное действительно работает: битый скрипт обнаруживается
+    # сейчас, а не в момент, когда им попытаются что-то выкатить.
+    "${SSH[@]}" "sudo $DEST/release.sh --help >/dev/null 2>&1 || sudo bash -n $DEST/release.sh" \
+        && ok "release.sh на сервере исполняем"
+fi
+
+# Сниппеты — по одному и через nginx-apply.sh, а не install: сниппет подключён
+# сразу во все сайты, поэтому битый файл роняет весь хост. Нужны ровно те же
+# бэкап, nginx -t и откат, что и для конфига сайта, — они там уже написаны.
+for s in "${sdrift[@]}"; do
+    "${SCP[@]}" "$KIT_DIR/nginx/snippets/$s" "$DEPLOY_USER@$DEPLOY_HOST:/tmp/$s"
+    "${SSH[@]}" "sed -i 's/\r\$//' '/tmp/$s'
+        sudo $DEST/nginx-apply.sh --app deploy-kit --conf '/tmp/$s' \
+             --dest '/etc/nginx/snippets/$s'
+        rc=\$?
+        rm -f '/tmp/$s'
+        exit \$rc" || die "сниппет $s не встал — nginx-apply.sh откатил изменения"
+done
+if (( ${#sdrift[@]} )); then ok "сниппеты выложены: ${sdrift[*]}"; fi
