@@ -5,10 +5,9 @@ name: CI
 # поэтому набор проверок здесь строже, чем у обычного проекта.
 
 on:
-  push:
-    branches: [main]
   pull_request:
-  workflow_dispatch:
+  push:
+    branches-ignore: [main]
 
 permissions:
   contents: read
@@ -18,6 +17,40 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Соглашение из CLAUDE.md, проверяемое машиной.
+  #
+  # Записанного правила оказалось мало: трейлер `Co-Authored-By: Claude` уехал
+  # в опубликованную историю, и убирать его пришлось переписыванием. Локальный
+  # хук (.githooks/commit-msg) ловит это раньше, но он включается вручную и в
+  # клоне отсутствует — здесь страховка.
+  commits:
+    name: Коммиты без упоминаний ИИ
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Проверить сообщения
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            RANGE="origin/${{ github.base_ref }}..HEAD"
+          else
+            RANGE="origin/main..HEAD"
+          fi
+          echo "проверяю $RANGE"
+
+          BAD=$(git log "$RANGE" --format='%H %B' \
+            | grep -iE '^Co-[Aa]uthored-[Bb]y:.*(claude|anthropic|copilot|gpt)|(generated|created|written) with .*(claude|copilot|chatgpt)|🤖' \
+            || true)
+
+          if [ -n "$BAD" ]; then
+            echo "::error::в сообщениях коммитов есть упоминания ИИ — авторство принадлежит владельцу репозитория (CLAUDE.md)"
+            echo "$BAD"
+            exit 1
+          fi
+          echo "чисто"
+
   shell:
     name: Скрипты
     runs-on: ubuntu-latest
