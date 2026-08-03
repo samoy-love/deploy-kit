@@ -49,7 +49,15 @@ done
 [[ -n "$APP" ]]     || die "нужен --app"
 [[ -n "$VERSION" ]] || die "нужен --version"
 [[ -n "$ARCHIVE" ]] || die "нужен --archive"
-ROOT="${ROOT:-/opt/$APP}"
+
+# Проверка аргументов, из которых собираются пути. Делается ДО всего
+# остального: ниже эти значения превращаются в `rm -rf`, `tar -xzf -C` и
+# `chown -R` от root, и одного «..» достаточно, чтобы увести их за пределы
+# каталога выкатки. sudoers на аргументы не смотрит принципиально
+# (server/sudoers.d/deploy-kit), поэтому граница проходит здесь.
+assert_path_component "--app" "$APP"
+assert_path_component "--version" "$VERSION"
+ROOT="$(assert_deploy_root "${ROOT:-/opt/$APP}")" || exit 1
 
 # Цель с WRITE_VERSION_FILE=0 (например, морда админки) version.json не
 # раздаёт. Сверять по HTTP нечего — и шлюз, и проверка после выкатки
@@ -149,6 +157,13 @@ ok "релиз распакован"
 
 # --- 2. Переключить -------------------------------------------------------
 # До этой строки прод работает на старом релизе и ничего не замечает.
+#
+# Куда previous указывал ДО нас — чтобы откат мог вернуть и его. Иначе после
+# автоотката previous и current показывают на один каталог, и следующий
+# `dk rollback <цель>` без --to упирается в «уже на этом релизе»: имя релиза,
+# бывшего до текущего, оказывается потеряно ровно в тот момент, когда его
+# труднее всего вспомнить.
+PREV_PREV="$(readlink -f "$PREVIOUS" 2>/dev/null || true)"
 [[ -n "$PREV_TARGET" ]] && switch_symlink "$PREVIOUS" "$PREV_TARGET"
 switch_symlink "$CURRENT" "$NEW_DIR"
 ok "current -> $VERSION"
@@ -159,6 +174,13 @@ rollback() {
         die "откатываться некуда: это была первая выкатка $APP. Релиз оставлен как есть, разбирайтесь вручную"
     fi
     switch_symlink "$CURRENT" "$PREV_TARGET"
+    # Возвращаем и previous: состояние симлинков после отката обязано быть
+    # тем же, что было до выкатки.
+    if [[ -n "$PREV_PREV" && -d "$PREV_PREV" ]]; then
+        switch_symlink "$PREVIOUS" "$PREV_PREV"
+    else
+        rm -f "$PREVIOUS"
+    fi
     # Юниты откатываем вместе с релизом: иначе на старом коде остался бы
     # ExecStart от нового, и откат чинил бы половину проблемы.
     install_units "$PREV_TARGET" || true
@@ -169,53 +191,8 @@ rollback() {
 }
 
 # --- 2.5. Юниты systemd из релиза ----------------------------------------
-#
-# Юнит лежит в git, а на сервер попадал руками, один раз, при установке.
-# Дальше файл в репозитории и файл на машине жили каждый своей жизнью:
-# правка ExecStart уезжала в main, зелёный деплой рапортовал об успехе, а
-# служба продолжала запускаться со старыми аргументами. Так статус-страница
-# полдня читала конфиг годовой давности при свежем релизе на диске.
-#
-# Ставим только то, что реально изменилось: daemon-reload на каждую выкатку
-# ради неизменившегося файла — лишний повод дёрнуть systemd.
-install_units() {
-    local dir="$1/systemd" name changed=0
-    [[ -d "$dir" ]] || return 0
-
-    local installed=()
-    shopt -s nullglob
-    local f
-    for f in "$dir"/*.service "$dir"/*.timer "$dir"/*.socket; do
-        name="$(basename "$f")"
-        if cmp -s "$f" "/etc/systemd/system/$name"; then
-            continue
-        fi
-        # Явное || return: функция вызывается через `|| rollback`, а в таком
-        # контексте set -e внутри неё не действует, и провал install молча
-        # прошёл бы дальше.
-        install -m 0644 "$f" "/etc/systemd/system/$name" || return 1
-        log "юнит обновлён: $name"
-        installed+=("$name")
-        changed=1
-    done
-    shopt -u nullglob
-
-    (( changed )) || return 0
-    systemctl daemon-reload
-
-    # Автозапуск включаем сами: юнит, приехавший впервые, иначе не переживёт
-    # перезагрузку сервера, и об этом узнают в худший момент. Таймеры и
-    # сокеты запускаем сразу — их, в отличие от службы, ниже никто не
-    # перезапустит.
-    for name in "${installed[@]}"; do
-        case "$name" in
-            *.timer|*.socket) systemctl enable --now "$name" || warn "не включён: $name" ;;
-            *)                systemctl enable "$name" >/dev/null 2>&1 || true ;;
-        esac
-    done
-    ok "юниты systemd применены"
-}
-
+# Сама install_units живёт в lib.sh: её обязан вызывать и ручной откат
+# (rollback.sh), иначе откат чинит половину проблемы.
 install_units "$NEW_DIR" || rollback
 
 # --- 3. Применить ---------------------------------------------------------

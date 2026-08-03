@@ -25,7 +25,15 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 [[ -n "$APP" ]] || die "нужен --app"
-ROOT="${ROOT:-/opt/$APP}"
+
+# Проверка аргументов, из которых собираются пути (см. lib.sh). Скрипт
+# запускается через sudo с неограниченными аргументами, а ниже из --root и
+# --to собирается путь, на который переключается симлинк current. Без этой
+# проверки `--to ../../..` проходил бы по единственному условию `[[ -d ... ]]`
+# и уводил сайт на произвольный существующий каталог.
+assert_path_component "--app" "$APP"
+[[ -z "$TO" ]] || assert_path_component "--to" "$TO"
+ROOT="$(assert_deploy_root "${ROOT:-/opt/$APP}")" || exit 1
 RELEASES="$ROOT/releases"
 CURRENT="$ROOT/current"
 
@@ -52,14 +60,41 @@ else
 fi
 
 CUR="$(readlink -f "$CURRENT" 2>/dev/null || true)"
-[[ "$TARGET" == "$CUR" ]] && die "уже на этом релизе: $(basename "$TARGET")"
+# Совпадение особенно вероятно сразу после автоотката внутри release.sh:
+# previous и current там какое-то время указывали на один каталог. Поэтому
+# подсказка про --list здесь обязательна — иначе сообщение выглядит тупиком.
+[[ "$TARGET" == "$CUR" ]] && die "уже на этом релизе: $(basename "$TARGET") — выберите другой через --to (посмотрите --list)"
 
 log "откат $APP: $(basename "$CUR") -> $(basename "$TARGET")"
 [[ -n "$CUR" ]] && switch_symlink "$ROOT/previous" "$CUR"
 switch_symlink "$CURRENT" "$TARGET"
 
+# Юниты откатываем вместе с релизом — ровно так же, как это делает
+# автоматический откат внутри release.sh. Без этого на старом коде остаётся
+# ExecStart от нового релиза: служба запускается со свежими аргументами по
+# файлам годовой давности, и ручной откат чинит половину проблемы, отчитавшись
+# об успехе. Провал установки юнита не отменяет уже переключённый симлинк —
+# говорим об этом вслух и продолжаем.
+install_units "$TARGET" || warn "юниты systemd НЕ откачены — проверьте /etc/systemd/system вручную"
+
+# Отдельный if, а не цепочка `nginx -t && reload && ok`: в цепочке errexit не
+# срабатывает, и падение nginx -t превращало весь шаг в молчаливый no-op —
+# скрипт доходил до «откат выполнен», пока nginx продолжал отдавать ту самую
+# конфигурацию, из-за которой откат и понадобился.
+NGINX_OK=1
 if (( NGINX_RELOAD )); then
-    nginx -t >/dev/null 2>&1 && systemctl reload nginx && ok "nginx перезагружен"
+    if nginx -t >/dev/null 2>&1; then
+        if systemctl reload nginx; then
+            ok "nginx перезагружен"
+        else
+            NGINX_OK=0
+            warn "systemctl reload nginx не отработал — конфигурация НЕ перезагружена"
+        fi
+    else
+        NGINX_OK=0
+        nginx -t || true
+        warn "nginx -t падает — конфигурация НЕ перезагружена, откат неполный"
+    fi
 fi
 [[ -n "$UNIT" ]] && { systemctl restart "$UNIT"; ok "$UNIT перезапущен"; }
 
@@ -67,4 +102,8 @@ if [[ -n "$HEALTH" ]]; then
     wait_http "$HEALTH" 10 3 || warn "healthcheck не прошёл ПОСЛЕ отката — состояние требует ручного разбора"
 fi
 
-ok "откат выполнен: $APP на $(basename "$TARGET")"
+if (( NGINX_OK )); then
+    ok "откат выполнен: $APP на $(basename "$TARGET")"
+else
+    die "откат выполнен ЧАСТИЧНО: $APP на $(basename "$TARGET"), но nginx остался на прежней конфигурации"
+fi
