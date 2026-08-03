@@ -1,0 +1,243 @@
+# Выкатка самого deploy-kit.
+#
+# У deploy-kit нет .deploy-kit/*.env и он не проходит через release.sh: катить
+# нечего — это не сервис с релизами, а набор скриптов, которые ЖИВУТ на хосте.
+# Серверная часть (server/*.sh в /opt/deploy-kit, общие сниппеты nginx и файлы
+# уровня http в conf.d) обновляется единственной командой bin/install-server.
+#
+# Пока эта команда запускалась только руками, мерж в main менял код, но не
+# менял ничего на сервере. Правки лежали влитыми и невыкаченными, и понять это
+# можно было лишь заглянув на хост. Отдельно неприятно с исправлениями
+# безопасности: PR закрыт, дыра открыта.
+#
+# Конфиги САЙТОВ (nginx/sites/*.conf) сюда не входят намеренно: у каждого есть
+# проект-владелец, и он возит свой конфиг сам через nginx-apply.sh во время
+# собственной выкатки. Здесь ездит только то, у чего владельца нет.
+#
+# Правило sudo (server/sudoers.d/deploy-kit) тоже не ездит: --with-sudoers
+# меняет ПРАВА на хосте, а не код, и остаётся ручным шагом. См. шапку
+# bin/install-server.
+name: Выкатка
+
+on:
+  push:
+    branches: [main]
+    paths:
+      # Ровно то, что публикует install-server. Правка bin/* или README сервер
+      # не трогает: bin/changelog CI качает с raw.githubusercontent прямо на
+      # раннер, а bin/deploy и bin/dk работают с машины разработчика.
+      - 'server/**'
+      - 'nginx/snippets/**'
+      - 'nginx/conf.d/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Показать план, ничего не менять'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Выкладка идёт в /opt/deploy-kit и /etc/nginx — два одновременных прогона
+# перезаписывали бы одни файлы. Очередь, а не отмена: отменённая выкладка
+# оставила бы хост наполовину обновлённым.
+concurrency:
+  group: deploy-kit-install
+  cancel-in-progress: false
+
+jobs:
+  install:
+    name: Выложить на сервер
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Истории нужно на список изменений. fetch-tags — чтобы диапазон
+          # «от прошлого тега» вообще был доступен: при ненулевой глубине теги
+          # иначе не приезжают. Здесь это безопасно, в отличие от go-service:
+          # тегом версию релиза мы не считаем.
+          fetch-depth: 50
+          fetch-tags: true
+
+      - name: Завести ссылку origin/main
+        # install-server отказывается выкладывать невлитое: он сверяет каждый
+        # файл с origin/main. actions/checkout эту remote-ссылку не создаёт,
+        # и без неё сверка сравнивала бы с пустотой.
+        run: git fetch --no-tags origin main:refs/remotes/origin/main
+
+      - name: Версия выкладки
+        id: ver
+        run: echo "version=release-$(date -u +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Ключи доступа
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST_KEY: ${{ secrets.SSH_HOST_KEY }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          if [ -z "$KEY" ] || [ -z "$HOST" ]; then
+            echo "::error::DEPLOY_SSH_KEY или DEPLOY_HOST не заданы в секретах репозитория — выкладывать некуда"
+            exit 1
+          fi
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          if [ -n "$HOST_KEY" ]; then
+            printf '%s\n' "$HOST_KEY" > ~/.ssh/known_hosts
+          else
+            echo "::warning::SSH_HOST_KEY не задан"
+            ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          fi
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: План выкладки
+        # Без --apply install-server только показывает разницу. Печатаем её
+        # всегда: в логе прогона видно, что именно уехало, даже когда следом
+        # применили.
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_KEY: /home/runner/.ssh/deploy_key
+        run: bash bin/install-server
+
+      - name: Выложить
+        if: ${{ !inputs.dry-run }}
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_KEY: /home/runner/.ssh/deploy_key
+        run: bash bin/install-server --apply
+
+      - name: Уведомить в Telegram
+        if: always() && !inputs.dry-run
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          APP: deploy-kit
+          VERSION: ${{ steps.ver.outputs.version }}
+          STATUS: ${{ job.status }}
+          BEFORE: ${{ github.event.before }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          LINK_BASE: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          # Пустой секрет молчал бы так же, как «уведомления выключены», и
+          # «о выкладке не сообщили» было бы неотличимо от «сообщать не
+          # просили». Именно из-за такой тишины пять репозиториев из шести
+          # годами не слали ни одного сообщения, и никто не заметил.
+          if [ -z "$TOKEN" ] || [ -z "$CHAT" ]; then
+            echo "::warning::TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID не заданы в секретах репозитория — о выкладке никто не узнал"
+            exit 0
+          fi
+
+          # Генератор лежит в этом же репозитории — качать его с raw, как это
+          # делают переиспользуемые workflow, здесь незачем. Через bash: в
+          # индексе bin/* лежат как 100644, бита исполнения нет ни у одного.
+          CHANGES=""
+          if [ "$STATUS" = "success" ]; then
+            CHANGES="$(bash bin/changelog --repo "$GITHUB_WORKSPACE" --since "${BEFORE:-}" --all \
+                         --link-base "$LINK_BASE" || true)"
+            TEXT=$(printf '🧰 <b>deploy-kit</b> выложен на сервер\n<code>%s</code>\nсерверные скрипты, сниппеты nginx и conf.d' "$VERSION")
+          else
+            TEXT=$(printf '💥 <b>deploy-kit</b> — выкладка провалена\n<code>%s</code>\n<a href="%s">лог прогона</a>' "$VERSION" "$RUN_URL")
+          fi
+
+          # Список — ПОСЛЕДНИМ блоком. Генератор отдаёт готовый фрагмент HTML
+          # со своим заголовком и уже экранированный: повторно не экранируем,
+          # в <pre> не заворачиваем, свой заголовок не дописываем.
+          if [ -n "$CHANGES" ]; then
+            TEXT=$(printf '%s\n%s' "$TEXT" "$CHANGES")
+          fi
+
+          # --- отправка: одним сообщением или несколькими подряд ------------
+          #
+          # Предел Telegram — 4096 единиц UTF-16 НА СООБЩЕНИЕ, и он жёсткий:
+          # текст длиннее API не режет, а ОТВЕРГАЕТ целиком. С --all потолка у
+          # списка нет, поэтому обязанность уложиться в предел лежит здесь.
+          # Режем ТОЛЬКО по границам строк: в строке стоит <a href="…">#21</a>,
+          # и рез посреди неё порвал бы тег, а невалидная разметка — снова
+          # отказ API, то есть потерянная часть.
+          LIMIT=4096
+          BUDGET=$(( LIMIT - 160 ))
+
+          if command -v jq >/dev/null 2>&1; then
+            # Считаем тем же счётом, что и Telegram, — в единицах UTF-16:
+            # символ вне BMP (эмодзи в шапке) занимает ДВЕ единицы.
+            line_len() { jq -Rrn 'inputs | ([explode[] | if . > 65535 then 2 else 1 end] | add // 0)'; }
+          else
+            # Без jq считаем байтами. В UTF-8 байтов всегда не меньше, чем
+            # единиц UTF-16, поэтому оценка идёт В ЗАПАС: сообщений выйдет
+            # больше необходимого, но длиннее предела — ни одного.
+            line_len() { LC_ALL=C awk '{ print length($0) }'; }
+          fi
+
+          mapfile -t MSG_LINES <<< "$TEXT"
+          # tr -d '\r': вывод с CRLF дал бы «27\r», а для (( … )) это не число,
+          # но ошибка ТИХАЯ — условие просто ложно, и упаковка рассыпается на
+          # «по сообщению на строку».
+          mapfile -t MSG_LENS < <(printf '%s\n' "$TEXT" | line_len | tr -d '\r')
+
+          MEASURED=1
+          if (( ${#MSG_LENS[@]} != ${#MSG_LINES[@]} )); then
+            MEASURED=0
+          else
+            for n in "${MSG_LENS[@]}"; do
+              case "$n" in ''|*[!0-9]*) MEASURED=0; break ;; esac
+            done
+          fi
+
+          PARTS=()
+          if (( MEASURED == 0 )); then
+            echo "::warning::не удалось измерить сообщение — отправляю одним куском"
+            PARTS=("$TEXT")
+          else
+            cur=""; curlen=0; started=0
+            for i in "${!MSG_LINES[@]}"; do
+              l="${MSG_LINES[i]}"; n="${MSG_LENS[i]}"
+              if (( started == 0 )); then
+                cur="$l"; curlen=$n; started=1
+              elif (( curlen + 1 + n <= BUDGET )); then
+                cur="$cur"$'\n'"$l"; curlen=$(( curlen + 1 + n ))
+              else
+                PARTS+=("$cur"); cur="$l"; curlen=$n
+              fi
+            done
+            if (( started )); then PARTS+=("$cur"); fi
+          fi
+
+          TOTAL_PARTS=${#PARTS[@]}
+          PART_NO=0
+          for part in "${PARTS[@]}"; do
+            PART_NO=$(( PART_NO + 1 ))
+            if (( TOTAL_PARTS > 1 )); then
+              if (( PART_NO == 1 )); then
+                part="$part"$'\n'"<i>часть 1 из $TOTAL_PARTS — продолжение ниже</i>"
+              else
+                part="<b>$APP</b> — часть $PART_NO из $TOTAL_PARTS"$'\n'"$part"
+              fi
+            fi
+            # Ответ API РАЗБИРАЕТСЯ, а не выбрасывается: отвергнутое сообщение
+            # ничем иначе от отправленного не отличается — ни кодом curl, ни
+            # логом. В лог уходит только НОМЕР части: в теле ответа Telegram
+            # возвращает эхом chat_id, а это секрет.
+            RESP="$(curl -s -X POST "https://api.telegram.org/bot$TOKEN/sendMessage" \
+              -d chat_id="$CHAT" -d parse_mode=HTML -d disable_web_page_preview=true \
+              --data-urlencode "text=$part" || true)"
+            # На первой же неудаче отправка прекращается: «1 из 3» и сразу
+            # «3 из 3» читается как «всё пришло». Правило то же, что в
+            # bin/deploy и в переиспользуемых workflow.
+            case "$RESP" in
+              *'"ok":true'*) ;;
+              *)
+                echo "::warning::Telegram не принял часть $PART_NO из $TOTAL_PARTS — уведомление дошло не полностью."
+                echo "::warning::Отправлено частей: $(( PART_NO - 1 )) из $TOTAL_PARTS, остальные не отправлялись."
+                break
+                ;;
+            esac
+          done
+
+      - name: Убрать ключ
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
