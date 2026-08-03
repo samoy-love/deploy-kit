@@ -42,13 +42,24 @@ on:
         type: boolean
         default: false
 
-# Минимальные права для GITHUB_TOKEN. Пайплайну нужен только checkout —
-# всё остальное он делает по SSH секретами, а не токеном. Блок задан здесь,
-# а не оставлен на настройки репозитория-вызывателя: переиспользуемый workflow
-# катит прод во всех проектах сразу, и его права не должны зависеть от того,
-# кто именно его позвал.
+# Минимальные права для GITHUB_TOKEN. Саму выкатку пайплайн делает по SSH
+# секретами, а не токеном; токену остаются checkout и ОДНА вещь сверх того —
+# запись о выкатке (Deployment) против вызвавшего коммита, отсюда
+# deployments: write. Блок задан здесь, а не оставлен на настройки
+# репозитория-вызывателя: переиспользуемый workflow катит прод во всех проектах
+# сразу, и его права не должны зависеть от того, кто именно его позвал.
+#
+# У этого рассуждения есть честная граница, и проходит она ровно здесь:
+# объявленное тут — ПОТОЛОК, а не выдача. Переиспользуемый workflow не может
+# держать прав больше, чем дал вызывающий: токен выдаёт вызывающий прогон, и
+# этот блок с его блоком пересекается, а не складывается. Значит
+# `deployments: write` обязаны объявить ОБЕ стороны — здесь и в каждом
+# вызывающем workflow рядом с contents: read, — иначе API отвечает 403.
+# Половины приезжают в разном порядке и в разные дни, поэтому шаги записи о
+# выкатке 403 переживают и катят дальше: запись — украшение, выкатка — нет.
 permissions:
   contents: read
+  deployments: write
 
 concurrency:
   # Ключ включает ЦЕЛЬ, а не только репозиторий.
@@ -180,6 +191,88 @@ jobs:
           V="release-$(TZ=Europe/Moscow date '+%Y%m%d-%H%M%S')-$(git rev-parse --short HEAD)"
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "Версия: $V"
+
+      # Запись о выкатке средствами самого GitHub: Deployment против ТОГО
+      # коммита, который выкатку вызвал. Связь «коммит → выкатка» до сих пор
+      # существовала только внутри релиза — в имени release-<дата>-<sha> и в
+      # поле commit файла version.json, — то есть чтобы её увидеть, надо было
+      # заранее знать, куда смотреть. Deployment виден там, куда смотрят и
+      # так: строкой на самом коммите и в панели Environments репозитория.
+      #
+      # ОКРУЖЕНИЕ — ЭТО ЦЕЛЬ, А НЕ РЕПОЗИТОРИЙ: берём APP из описания цели.
+      # В хозяйстве есть репозиторий с четырьмя целями; назови окружение
+      # именем репозитория — и в панели окажется одно окружение, в которое по
+      # очереди «выкатываются» четыре разных вещи, и история каждой затирает
+      # остальные три. APP — то же имя, под которым цель живёт на сервере, в
+      # юните и в сообщении о релизе, и связь читается без словаря.
+      #
+      # Шаг стоит не первым в job'е, а сразу за чтением описания и версией:
+      # раньше просто неоткуда взять ни имя окружения, ни описание записи.
+      # Зато ДО регресса — красный гейт это тоже исход выкатки, и запись
+      # обязана о нём рассказать, а не появиться только у удачных прогонов.
+      #
+      # При dry-run записи нет вовсе: прод не тронут, а «выкачено» на коммите
+      # и в панели Environments после проверочного прогона — прямая ложь.
+      #
+      # ЗАПИСЬ — УКРАШЕНИЕ ПОВЕРХ ВЫКАТКИ, ровно как список изменений, и
+      # правило у неё то же: ни один её отказ не имеет права ни уронить job,
+      # ни остановить выкатку. Отсюда continue-on-error, exit 0 на всех путях
+      # и ::warning:: вместо ::error::. Отдельной веткой разобран 403: право
+      # deployments: write обязаны дать обе стороны (см. комментарий у
+      # permissions), а вызывающие обновляются не одним коммитом с этим
+      # файлом. Пропавшая запись — потеря косметическая, упавшая выкатка нет.
+      - name: Завести запись о выкатке
+        id: deployment
+        if: ${{ !inputs.dry-run }}
+        continue-on-error: true
+        env:
+          TOKEN: ${{ github.token }}
+          API: ${{ github.api_url }}/repos/${{ github.repository }}/deployments
+          ENVIRONMENT: ${{ steps.cfg.outputs.app }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          # Коммит вызывающего: в переиспользуемом workflow github.sha — это
+          # ревизия того репозитория, который его позвал, и ровно её же выше
+          # выложил checkout. Записывать надо её, а не HEAD deploy-kit.
+          SHA: ${{ github.sha }}
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "::warning::нет jq — запись о выкатке не заводится, выкатка идёт дальше"
+            exit 0
+          fi
+          # required_contexts: [] обязательно. По умолчанию GitHub ждёт на
+          # коммите зелёных commit statuses и на их отсутствие отвечает 409 —
+          # запись не появилась бы никогда. Проверка здесь одна и она ниже:
+          # шаг «Полный регресс», а не статусы на коммите.
+          #
+          # auto_merge: false — иначе API вместо записи может завести мерж
+          # базовой ветки. Выкатка катит ровно то, что проверено, и ничего
+          # не мержит сама.
+          PAYLOAD="$(jq -n --arg ref "$SHA" --arg env "$ENVIRONMENT" --arg desc "$VERSION" \
+            '{ref:$ref,environment:$env,description:$desc,auto_merge:false,required_contexts:[]}')"
+          BODY="$(mktemp)"
+          CODE="$(curl -sS -o "$BODY" -w '%{http_code}' -X POST "$API" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -d "$PAYLOAD")" || CODE=000
+          case "$CODE" in
+            201)
+              ID="$(jq -r '.id // empty' "$BODY")"
+              if [ -n "$ID" ]; then
+                echo "deployment_id=$ID" >> "$GITHUB_OUTPUT"
+                echo "Запись о выкатке #$ID: окружение $ENVIRONMENT, коммит $SHA"
+              else
+                echo "::warning::GitHub завёл запись о выкатке, но не вернул её номер — исход отмечать будет нечем"
+              fi
+              ;;
+            403|404)
+              echo "::warning::нет права deployments: write (ответ $CODE) — записи о выкатке не будет. Вызывающий workflow должен объявить permissions: deployments: write рядом с contents: read. На саму выкатку это не влияет"
+              ;;
+            *)
+              echo "::warning::GitHub не завёл запись о выкатке (ответ $CODE) — выкатка идёт дальше"
+              ;;
+          esac
+          exit 0
 
       # Регресс идёт под архитектурой раннера — тесты должны выполняться,
       # а не кросс-компилироваться. Гонки ищутся именно здесь: -race не
@@ -628,6 +721,62 @@ jobs:
                 ;;
             esac
           done
+
+      # Исход выкатки — в ту же запись, и обязательно под always(). Запись,
+      # заведённая и навсегда оставшаяся в состоянии pending, врёт хуже, чем
+      # её отсутствие: на коммите висел бы вечный «выкатывается», а в панели
+      # Environments — цель, про которую непонятно, доехала она или нет.
+      #
+      # environment_url — HEALTH цели: с коммита и из панели открывается сам
+      # компонент, а не только лог. log_url — прогон, который эту выкатку
+      # сделал. Вместе они и дают связь «коммит ↔ выкатка» в обе стороны:
+      # с коммита видно выкатку, из выкатки — коммит.
+      #
+      # Условие на deployment_id закрывает разом три случая: dry-run,
+      # отказ создания (403 у необновлённого вызывающего) и ответ без номера.
+      # Нет номера — отмечать нечего, и шаг молча не выполняется.
+      - name: Отметить исход выкатки
+        if: always() && steps.deployment.outputs.deployment_id != ''
+        continue-on-error: true
+        env:
+          TOKEN: ${{ github.token }}
+          API: ${{ github.api_url }}/repos/${{ github.repository }}/deployments/${{ steps.deployment.outputs.deployment_id }}/statuses
+          ENVIRONMENT: ${{ steps.cfg.outputs.app }}
+          HEALTH: ${{ steps.cfg.outputs.health }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "::warning::нет jq — исход выкатки в записи не отмечен"
+            exit 0
+          fi
+          # Отменённый прогон — не провал выкатки: релиз переключается
+          # последним шагом, поэтому при отмене прод остаётся прежним.
+          # GitHub называет такой исход error, и это честнее, чем failure.
+          case "$STATUS" in
+            success)   STATE=success ;;
+            cancelled) STATE=error ;;
+            *)         STATE=failure ;;
+          esac
+          # HEALTH есть не у всякой цели, а пустой environment_url API
+          # отвергает целиком — вместе со всем статусом. Поэтому ключа
+          # просто нет, когда цели нечего открыть.
+          PAYLOAD="$(jq -n --arg state "$STATE" --arg env "$ENVIRONMENT" \
+            --arg log "$RUN_URL" --arg desc "$VERSION" --arg url "$HEALTH" \
+            '{state:$state,environment:$env,log_url:$log,description:$desc}
+             + (if $url == "" then {} else {environment_url:$url} end)')"
+          CODE="$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$API" \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -d "$PAYLOAD")" || CODE=000
+          case "$CODE" in
+            201) echo "Исход выкатки записан: $STATE" ;;
+            403|404) echo "::warning::нет права deployments: write (ответ $CODE) — исход выкатки не записан, запись останется в состоянии pending" ;;
+            *) echo "::warning::GitHub не принял исход выкатки (ответ $CODE) — запись останется в состоянии pending" ;;
+          esac
+          exit 0
 
       - name: Убрать ключ
         if: always()
