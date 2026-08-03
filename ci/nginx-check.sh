@@ -83,13 +83,46 @@ else
     # ложный зелёный, который опаснее отсутствия проверки.
     conf_b64="$(base64 -w0 "$CONF" 2>/dev/null || base64 "$CONF" | tr -d '\n')"
 
-    # Сниппеты берём НАСТОЯЩИЕ, из этого же репозитория: раньше здесь лежали
-    # две пустышки с прибитыми именами, и конфиг, подключающий любой другой
-    # сниппет, падал не по своей вине. Заодно так проверяется и содержимое
-    # сниппетов, а не только то, что файл существует.
-    snippets_dir="$(cd "$(dirname "$0")/../nginx/snippets" 2>/dev/null && pwd || true)"
+    # Сниппеты и conf.d берём НАСТОЯЩИЕ, из этого же репозитория: раньше здесь
+    # лежали две пустышки с прибитыми именами, и конфиг, подключающий любой
+    # другой сниппет, падал не по своей вине. Заодно так проверяется и
+    # содержимое сниппетов, а не только то, что файл существует.
+    #
+    # Но рядом со скриптом репозитория может и не быть. Выкатка проекта
+    # (static-site.yml, go-service.yml) качает ОДИН этот файл curl'ом в /tmp и
+    # зовёт его оттуда: соседнего nginx/ там нет, conf.d в контейнер не
+    # попадал, а сниппеты подменялись пустышками. Проверка при этом не
+    # отключалась, а начинала врать: любой конфиг с
+    # `access_log ... samoylove_metrics` валился с «unknown log format», потому
+    # что объявление формата живёт в conf.d/samoylove-log-metrics.conf и
+    # допустимо только на уровне http. Так упала выкатка metro.
+    #
+    # Поэтому недостающую половину доносим из того же deploy-kit@main, откуда
+    # приехал и сам скрипт: у проверки один источник правды при обоих способах
+    # запуска.
+    kit_nginx="$(cd "$(dirname "$0")/../nginx" 2>/dev/null && pwd || true)"
+    if [[ ! -d "$kit_nginx/conf.d" || ! -d "$kit_nginx/snippets" ]]; then
+        kit_repo="${DEPLOY_KIT_REPO:-tr0llex/deploy-kit}"
+        kit_ref="${DEPLOY_KIT_REF:-main}"
+        kit_tmp="$(mktemp -d)"
+        trap 'rm -rf "$kit_tmp"' EXIT
+        note "рядом со скриптом нет nginx/ — беру conf.d и snippets из $kit_repo@$kit_ref"
+        if curl -fsSL "https://codeload.github.com/$kit_repo/tar.gz/refs/heads/$kit_ref" \
+               | tar -xz -C "$kit_tmp" --strip-components=1 \
+           && [[ -d "$kit_tmp/nginx/conf.d" && -d "$kit_tmp/nginx/snippets" ]]; then
+            kit_nginx="$kit_tmp/nginx"
+        else
+            # Молча продолжать нельзя: без conf.d проверка либо валит конфиг за
+            # чужую вину, либо (если log_format не используется) выдаёт зелёный
+            # за проверку, которой не было.
+            bad "не удалось получить nginx/conf.d и nginx/snippets из $kit_repo@$kit_ref — проверять конфиг не с чем"
+            exit 1
+        fi
+    fi
+
+    snippets_dir="$kit_nginx/snippets"
     snippet_cmds=""
-    if [[ -n "$snippets_dir" ]]; then
+    if [[ -d "$snippets_dir" ]]; then
         for s in "$snippets_dir"/*.conf; do
             [[ -f "$s" ]] || continue
             s_b64="$(base64 -w0 "$s" 2>/dev/null || base64 "$s" | tr -d '\n')"
@@ -102,13 +135,16 @@ else
     # который проверяет.
     for want in $(grep -hoE 'include[[:space:]]+/etc/nginx/snippets/[^;]+' "$CONF" | awk '{print $2}' | xargs -r -n1 basename | sort -u); do
         [[ -f "$snippets_dir/$want" ]] && continue
+        # Подмена сниппета пустышкой — это дыра в проверке, и она должна быть
+        # видна в логе: содержимое такого сниппета никто не проверил.
+        note "сниппета $want нет в deploy-kit — подставлена пустышка, его содержимое не проверяется"
         snippet_cmds="${snippet_cmds}: > /etc/nginx/snippets/$want
 "
     done
 
     confd_cmds=""
-    confd_dir="$(cd "$(dirname "$0")/../nginx/conf.d" 2>/dev/null && pwd || true)"
-    if [[ -n "$confd_dir" ]]; then
+    confd_dir="$kit_nginx/conf.d"
+    if [[ -d "$confd_dir" ]]; then
         for c in "$confd_dir"/*.conf; do
             [[ -f "$c" ]] || continue
             c_b64="$(base64 -w0 "$c" 2>/dev/null || base64 "$c" | tr -d '
