@@ -119,6 +119,33 @@ A local deploy takes **the same path as CI**: the same target description and
 the same `release.sh` on the server. "Works locally, fails in CI" cannot happen
 by construction.
 
+## Running locally
+
+`dk run` is the same target registry, on your own machine. It answers "what
+runs here, and how" — an answer that used to live only in someone's head.
+
+```bash
+dk run --list               # what runs locally and on which ports
+dk run                      # the services of the project you are standing in
+dk run metro die-game       # selected targets
+dk run --dry-run            # directories, ports, variables — starting nothing
+dk run --branch main        # the same, from another branch
+```
+
+`Ctrl-C` stops everything the command started — **by port, not by the parent
+PID**: `go run` compiles a binary and runs it as a separate process, so the
+port is held by a grandchild, and killing the parent would leave an orphan.
+
+Running is described where deploying is, by `RUN_*` keys in
+`.deploy-kit/*.env`. There is deliberately no separate registry: two lists of
+targets drift apart eventually, and "add a file — get a target" stops being
+true. The keys are documented in [docs/run.md](docs/run.md) (Russian).
+
+There are no containers here and none are planned: production is systemd plus
+`release.sh` on arm64, Docker reproduces neither the architecture nor the unit
+sandbox nor nginx, and the flagship client is WPF on Windows. The full
+reasoning is at the top of [docs/run.md](docs/run.md).
+
 Updating the server-side scripts:
 
 ```bash

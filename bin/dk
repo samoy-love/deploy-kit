@@ -10,6 +10,8 @@
 #   dk deploy snakes        конкретная цель
 #   dk deploy --all         вообще всё
 #   dk deploy --dry-run     показать план, ничего не менять
+#   dk run                  поднять локально сервисы текущего проекта
+#   dk run --list           что вообще запускается локально и на каких портах
 #   dk rollback snakes      откатить на предыдущий релиз
 #   dk help                 подробности
 
@@ -75,14 +77,22 @@ fi
 # ------------------------------------------------------------------ поиск целей
 #
 # Возвращает строки вида: <имя цели>|<каталог проекта>|<файл описания>
+#
+# LOCAL_ONLY=1 — цель, которой на проде нет вовсе: WPF-клиент собирается под
+# Windows и уезжает к пользователю установщиком, а не релизом на сервер. В
+# реестре она нужна ради `dk run`, но выкатывать и опрашивать её нечего,
+# поэтому по умолчанию из выдачи убирается — иначе `dk` показывал бы её
+# вечно красной строкой «нет ответа», а `dk deploy --all` пытался бы катить.
 discover() {
-    local d f app
+    local d f app with_local=0
+    [[ "${1:-}" == "--with-local" ]] && with_local=1
     for d in "$PROJECTS_ROOT"/*/; do
         [[ -d "$d/.deploy-kit" ]] || continue
         for f in "$d/.deploy-kit"/*.env; do
             [[ -f "$f" ]] || continue
             app="$(grep -m1 '^APP=' "$f" | cut -d= -f2- | tr -d '"'"'"'')"
             [[ -n "$app" ]] || continue
+            (( with_local )) || [[ "$(cfg_val LOCAL_ONLY "$f")" != "1" ]] || continue
             printf '%s|%s|%s\n' "$app" "${d%/}" "$f"
         done
     done
@@ -371,6 +381,62 @@ cmd_deploy() {
     fi
 }
 
+# Локальный запуск. Обнаружение целей, разрешение имён и «проект, в котором я
+# стою» — те же самые, что у выкатки: второй способ найти цель означал бы, что
+# `dk deploy` и `dk run` однажды разойдутся во мнении, что вообще существует.
+# Всё остальное — процессы, порты, ветки — живёт в bin/run.
+cmd_run() {
+    local mode="" pass=() targets=() all=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --all)     all=1; shift ;;
+            --list)    mode=list; pass+=(--list); shift ;;
+            --dry-run) pass+=(--dry-run); shift ;;
+            --force)   pass+=(--force); shift ;;
+            --branch)  pass+=(--branch "${2:-}"); shift 2 ;;
+            -*)        die "неизвестный флаг: $1" ;;
+            *)         targets+=("$1"); shift ;;
+        esac
+    done
+
+    (( all )) && (( ${#targets[@]} )) \
+        && die "--all и список целей несовместимы: выберите что-то одно"
+
+    [[ -x "$KIT_DIR/bin/run" ]] \
+        || die "не найден $KIT_DIR/bin/run — проверьте установку deploy-kit"
+
+    # Реестр уезжает в раннер ЦЕЛИКОМ и всегда, включая локальные цели: по
+    # нему разрешается RUN_NEEDS, а сосед, которого надо поднять раньше,
+    # может не входить в выборку.
+    local registry; registry="$(discover --with-local)"
+    [[ -n "$registry" ]] || die "не найдено ни одной цели (dk list)"
+
+    local list=()
+    if [[ "$mode" == list ]]; then
+        # --list отвечает на вопрос «что здесь вообще запускается», а он не
+        # про текущий каталог.
+        mapfile -t list < <(awk -F'|' '{print $1}' <<<"$registry")
+    elif (( all )); then
+        mapfile -t list < <(awk -F'|' '{print $1}' <<<"$registry")
+    elif (( ${#targets[@]} )); then
+        local t
+        for t in "${targets[@]}"; do
+            awk -F'|' -v w="$t" '$1==w' <<<"$registry" | grep -q . \
+                || die "нет цели «$t». Посмотрите: dk run --list"
+            list+=("$t")
+        done
+    else
+        local cur; cur="$(current_project)" \
+            || die "вы не внутри проекта. Укажите цель или используйте --all (dk run --list)"
+        mapfile -t list < <(awk -F'|' -v d="$cur" '$2==d {print $1}' <<<"$registry")
+        (( ${#list[@]} )) || die "в $(basename "$cur") нет целей запуска"
+    fi
+
+    # Раннер держит терминал до Ctrl-C, и сигнал должен доходить до него, а не
+    # до dk: exec отдаёт ему процесс целиком.
+    exec "$KIT_DIR/bin/run" "${pass[@]}" "${list[@]}" <<<"$registry"
+}
+
 cmd_rollback() {
     local target="${1:-}"; shift || true
     [[ -n "$target" ]] || die "укажите цель: dk rollback <цель> [--list] [--to <версия>]"
@@ -420,11 +486,22 @@ dk — выкатка проектов samoy.love одной командой
   dk rollback <цель> --to X   откатить на конкретный релиз
   dk help                     эта справка
 
+ЛОКАЛЬНЫЙ ЗАПУСК
+  dk run                      поднять сервисы проекта, в котором вы стоите
+  dk run <цель> [<цель>…]     выборочно
+  dk run --all                всё, что вообще запускается локально
+  dk run --list               что запускается и на каких портах
+  dk run --dry-run            план: каталоги, порты, переменные
+  dk run --branch main        то же, но на другой ветке — через worktree
+  dk run --force              занятый порт освободить, а не отказаться стартовать
+
 ПРИМЕРЫ
   dk deploy                   стоя в MetroMap — выкатит metro
   dk deploy snakes status-site
   dk deploy --all --dry-run   посмотреть, что уедет, ничего не трогая
   dk rollback snakes --list
+  dk run metro die-game       две игры рядом, на разных портах
+  dk run --branch feat/x      ветка едет в ~/.cache, рабочее дерево не трогается
 
 КАК ЭТО УСТРОЕНО
   Цели обнаруживаются сами: каждый .deploy-kit/*.env в соседних репозиториях —
@@ -433,6 +510,11 @@ dk — выкатка проектов samoy.love одной командой
   Локальная выкатка идёт тем же путём, что и CI: один и тот же файл описания
   и один и тот же release.sh на сервере. Расхождения «локально работает, в CI
   нет» быть не может по построению.
+
+  Запуск читает тот же файл описания — ключи RUN_*. Отдельного реестра под
+  локальный запуск нет намеренно: два списка целей однажды разойдутся, и
+  «добавили файл — появилась цель» перестанет быть правдой. Ключи описаны
+  в docs/run.md.
 
 НАСТРОЙКА
   ~/.config/deploy-kit/dk.conf (или переменные окружения):
@@ -452,6 +534,7 @@ case "${1:-status}" in
     ""|status)          shift || true; cmd_status ;;
     list|ls)            shift; cmd_list ;;
     deploy|d)           shift; cmd_deploy "$@" ;;
+    run|r)              shift; cmd_run "$@" ;;
     rollback|rb)        shift; cmd_rollback "$@" ;;
     help|-h|--help)     cmd_help ;;
     *)                  die "неизвестная команда: $1 (см. dk help)" ;;

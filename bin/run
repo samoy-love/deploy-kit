@@ -1,0 +1,680 @@
+#!/usr/bin/env bash
+# run — локальный запуск целей samoy.love. Двойник `deploy`, но для своей
+# машины: та же модель «ферма → сервисы», те же имена целей, тот же реестр.
+#
+# Вызывается не руками, а из `dk run`: разрешение имён, «проект, в котором я
+# стою» и `--all` живут в dk и дублировать их здесь незачем.
+#
+#   discover | run --list                показать, что запускается
+#   discover | run --dry-run <цель>…     план: каталоги, порты, окружение
+#   discover | run <цель>…               запустить и держать
+#   discover | run --branch main <цель>… то же, но на другой ветке
+#
+# СТДИН — весь реестр целей (строки `имя|каталог проекта|файл описания`),
+# аргументы — что из него запускать. Реестр нужен целиком, а не по выбранным
+# целям: RUN_NEEDS ссылается на соседей, которых в выборке может не быть.
+#
+# ---------------------------------------------------------------- ключи RUN_*
+#
+# Живут в том же .deploy-kit/*.env, что и выкатка. Второй реестр (свой файл
+# под запуск) означал бы второй способ рассинхронизироваться: цель появилась
+# бы в одном списке и пропала из другого, и «добавили файл — появилась цель»
+# перестало бы быть правдой.
+#
+#   RUN_CMD      команда старта. Нет ключа — цель локально не запускается
+#   RUN_DIR      рабочий каталог относительно корня проекта (по умолчанию корень)
+#   RUN_PORT     порт: по нему проверяется готовность и по нему же гасится
+#   RUN_ENV      переменные через `;`, только безопасные для локальной машины
+#   RUN_HEALTH   путь проверки живости на RUN_PORT (например /healthz)
+#   RUN_NEEDS    цели, которые должны подняться раньше, через запятую
+#   RUN_SECRETS  имена переменных, которым раннер выдаёт эфемерное значение
+#   RUN_ONESHOT  цель отрабатывает и выходит — ждать её, а не следить за ней
+#   RUN_SKIP     причина, по которой цель локально не поднимается
+#   RUN_NOTE     что человеку надо знать про эту цель при запуске
+#
+# В RUN_CMD и RUN_ENV раскрываются четыре подстановки:
+#
+#   %PORT%   значение RUN_PORT
+#   %DIR%    корень дерева, из которого идёт запуск (с --branch — worktree)
+#   %MAIN%   корень проекта в ОСНОВНОМ дереве, worktree его не меняет
+#   %KIT%    корень deploy-kit
+#
+# %MAIN% существует ради общего состояния: контент лаунчера и данные агента
+# лежат вне git, и в свежем worktree их не будет. Прод устроен так же —
+# контент живёт вне каталога релиза, и выкатка его не касается.
+
+set -Eeuo pipefail
+
+KIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'; CYA=$'\033[36m'
+BLD=$'\033[1m'; DIM=$'\033[2m'; RST=$'\033[0m'
+if [[ ! -t 1 || -n "${NO_COLOR:-}" ]]; then
+    RED=''; GRN=''; YEL=''; CYA=''; BLD=''; DIM=''; RST=''
+fi
+say()  { printf '\n%s%s▸ %s%s\n' "$BLD" "$CYA" "$*" "$RST"; }
+ok()   { printf '%s✓%s %s\n' "$GRN" "$RST" "$*"; }
+warn() { printf '%s!%s %s\n' "$YEL" "$RST" "$*" >&2; }
+die()  { printf '%s✗%s %s\n' "$RED" "$RST" "$*" >&2; exit 1; }
+
+# Дополнение до ширины колонки: printf считает байты, кириллица разносит
+# таблицу. Та же функция, что в dk, и по той же причине.
+pad() {
+    local s="$1" w="$2" t="${1//[$'\x80'-$'\xbf']/}"
+    printf '%s%*s' "$s" "$(( w > ${#t} ? w - ${#t} : 0 ))" ''
+}
+
+# Windows отличается ровно двумя вещами: как убить процесс и как выглядит путь.
+# Всё остальное — go, node, npm — везде одинаково.
+WIN=0
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) WIN=1 ;; esac
+
+# Путь в виде, понятном не-MSYS программе. Go и .NET не знают, что такое
+# /c/Users: им нужен C:/Users. Обратная косая тоже подошла бы, но она сама
+# себе экранирование в каждой следующей строке — берём -m.
+nat() {
+    if (( WIN )) && command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"
+    else printf '%s' "$1"; fi
+}
+
+# Значение ключа из описания цели.
+#
+# Отдельно от cfg_val в dk: тот срезает ВСЕ кавычки подряд (`tr -d`), и
+# RUN_CMD вроде `npm run dev -- --port 5173` с внутренними кавычками приехал
+# бы искажённым. Снимаем только окружающую пару — ровно как это сделал бы
+# шелл, прочитавший строку присваивания.
+#
+# `|| true` обязателен: при set -Eeuo pipefail отсутствие ключа даёт grep 1,
+# pipefail тянет его наружу и убивает раннер молча. Отсутствие ключа — не
+# ошибка, а пустое значение.
+run_val() {
+    local v
+    v="$(grep -m1 "^$1=" "$2" 2>/dev/null | cut -d= -f2- || true)"
+    if [[ ${#v} -ge 2 && "$v" == \"*\" ]]; then v="${v:1:${#v}-2}"
+    elif [[ ${#v} -ge 2 && "$v" == \'*\' ]]; then v="${v:1:${#v}-2}"; fi
+    printf '%s' "$v"
+}
+
+# ------------------------------------------------------------------ аргументы
+
+MODE=run BRANCH="" FORCE=0
+declare -a WANT=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --list)     MODE=list; shift ;;
+        --dry-run)  MODE=dry; shift ;;
+        --force)    FORCE=1; shift ;;
+        --branch)   BRANCH="${2:-}"; [[ -n "$BRANCH" ]] || die "--branch без имени ветки"; shift 2 ;;
+        -*)         die "неизвестный флаг: $1" ;;
+        *)          WANT+=("$1"); shift ;;
+    esac
+done
+
+# ------------------------------------------------------------------ реестр
+
+declare -A DIR_OF FILE_OF
+declare -a ALL=()
+while IFS='|' read -r app dir file; do
+    [[ -n "$app" ]] || continue
+    DIR_OF["$app"]="$dir"; FILE_OF["$app"]="$file"
+    ALL+=("$app")
+done
+(( ${#ALL[@]} )) || die "реестр целей пуст — раннер вызван не из dk?"
+
+declare -A CMD DIRK PORT ENVK HEALTH NEEDS SECRETS ONESHOT SKIP NOTE
+for app in "${ALL[@]}"; do
+    f="${FILE_OF[$app]}"
+    CMD["$app"]="$(run_val RUN_CMD "$f")"
+    DIRK["$app"]="$(run_val RUN_DIR "$f")"
+    PORT["$app"]="$(run_val RUN_PORT "$f")"
+    ENVK["$app"]="$(run_val RUN_ENV "$f")"
+    HEALTH["$app"]="$(run_val RUN_HEALTH "$f")"
+    NEEDS["$app"]="$(run_val RUN_NEEDS "$f")"
+    SECRETS["$app"]="$(run_val RUN_SECRETS "$f")"
+    ONESHOT["$app"]="$(run_val RUN_ONESHOT "$f")"
+    SKIP["$app"]="$(run_val RUN_SKIP "$f")"
+    NOTE["$app"]="$(run_val RUN_NOTE "$f")"
+done
+
+# ------------------------------------------------------------------ --list
+
+if [[ "$MODE" == list ]]; then
+    say "Что запускается локально"
+    printf '%s  %s %s %s %s%s\n' "$DIM" \
+        "$(pad ЦЕЛЬ 20)" "$(pad ПРОЕКТ 20)" "$(pad ПОРТ 6)" "КОМАНДА" "$RST"
+    n_run=0 n_skip=0
+    for app in "${ALL[@]}"; do
+        if [[ -n "${CMD[$app]}" ]]; then
+            n_run=$(( n_run + 1 ))
+            p="${PORT[$app]:-—}"; pc=""; [[ "$p" == "—" ]] && pc="$DIM"
+            printf '%s✓%s %s %s %s%s%s %s\n' "$GRN" "$RST" \
+                "$(pad "$app" 20)" "$(pad "$(basename "${DIR_OF[$app]}")" 20)" \
+                "$pc" "$(pad "$p" 6)" "${pc:+$RST}" "${CMD[$app]}"
+        else
+            n_skip=$(( n_skip + 1 ))
+            # Причина обязана быть названа. Цель без RUN_CMD и без RUN_SKIP —
+            # это не «не запускается», это «забыли заполнить», и разница
+            # видна только здесь.
+            r="${SKIP[$app]:-нет RUN_CMD в описании цели}"
+            printf '%s·%s %s %s %s%s %s%s\n' "$DIM" "$RST" \
+                "$(pad "$app" 20)" "$(pad "$(basename "${DIR_OF[$app]}")" 20)" \
+                "$DIM" "$(pad "—" 6)" "$r" "$RST"
+        fi
+    done
+    echo
+    ok "запускается: $n_run; пропускается: $n_skip"
+    printf '%sПорты берутся из RUN_PORT и фиксируются явно: Astro и Vite при%s\n' "$DIM" "$RST"
+    printf '%sзанятом порте молча уезжают на соседний, и сайт оказывается не там.%s\n' "$DIM" "$RST"
+    exit 0
+fi
+
+(( ${#WANT[@]} )) || die "не указано ни одной цели"
+
+# ------------------------------------------------------------------ порядок
+
+# Целевой список с раскрытыми RUN_NEEDS, зависимости — раньше зависящих.
+# Обход в глубину: ферм на десяток сервисов здесь не бывает, а цикл ловится
+# отметкой «в работе».
+declare -A STATE
+declare -a ORDER=()
+visit() {
+    local a="$1" chain="$2" d
+    case "${STATE[$a]:-}" in
+        done) return 0 ;;
+        busy) die "циклическая зависимость RUN_NEEDS: $chain → $a" ;;
+    esac
+    [[ -n "${FILE_OF[$a]:-}" ]] || die "нет цели «$a» (упомянута в RUN_NEEDS: $chain)"
+    STATE["$a"]=busy
+    IFS=',' read -ra deps <<<"${NEEDS[$a]}"
+    for d in "${deps[@]}"; do
+        d="${d// /}"; [[ -n "$d" ]] || continue
+        visit "$d" "$chain → $a"
+    done
+    STATE["$a"]="done"
+    ORDER+=("$a")
+}
+for app in "${WANT[@]}"; do
+    [[ -n "${FILE_OF[$app]:-}" ]] || die "нет цели «$app». Посмотрите: dk run --list"
+    visit "$app" "$app"
+done
+
+# Незапускаемые отсеиваются здесь, а не при разборе: пропуск должен быть
+# назван вслух. Молча выкинутая цель выглядит как запущенная.
+declare -a PLAN=()
+for app in "${ORDER[@]}"; do
+    if [[ -n "${CMD[$app]}" ]]; then PLAN+=("$app")
+    else warn "$app пропущен: ${SKIP[$app]:-нет RUN_CMD в описании цели}"; fi
+done
+(( ${#PLAN[@]} )) || die "запускать нечего: все выбранные цели пропущены"
+
+# ------------------------------------------------------------------ деревья
+
+# Каталог, из которого реально идёт запуск. Без --branch это само рабочее
+# дерево со всеми незакоммиченными правками — так и задумано, это дефолт.
+declare -A TREE
+CACHE="${DK_CACHE:-$HOME/.cache/deploy-kit}"
+
+# Worktree, а не checkout: в рабочих деревьях лежит незакоммиченная работа, и
+# checkout её снёс бы или потребовал stash. И вне каталога проекта, а не
+# внутри: worktree в репозитории ломает grep и аудит — поиск начинает
+# находить вторые экземпляры конфигов.
+prepare_tree() {
+    local app="$1"
+    local main="${DIR_OF[$app]}"
+    if [[ -z "$BRANCH" ]]; then TREE["$app"]="$main"; return 0; fi
+
+    local proj safe wt
+    proj="$(basename "$main")"
+    safe="${BRANCH//\//-}"
+    wt="$CACHE/worktrees/$proj/$safe"
+    TREE["$app"]="$wt"
+    [[ -d "$wt" ]] && return 0
+    # Сухой прогон не создаёт worktree: он обещает не менять ничего, а
+    # каталог на диске и запись в .git/worktrees — это изменение. Показываем
+    # путь, по которому дерево появилось бы.
+    [[ "$MODE" == dry ]] && return 0
+
+    mkdir -p "$(dirname "$wt")"
+    say "$proj: worktree ветки $BRANCH"
+    # --detach, А НЕ ВЫДАЧА ВЕТКИ ВО ВЛАДЕНИЕ.
+    #
+    # Одну ветку git разрешает держать ровно одному дереву, и `dk run metro
+    # --branch main`, стоя на main, отказал бы: «main is already checked out».
+    # Между тем это самый частый запрос — «посмотреть, как оно на main, не
+    # трогая мои правки». Нам нужен КОД ветки, а не право коммитить в неё;
+    # отсоединённое дерево даёт первое и не претендует на второе.
+    #
+    # origin/<ветка> вторым заходом: ветки, которой нет локально, у git нет
+    # причин угадывать, а «запусти feat/x с сервера» — обычное дело.
+    git -C "$main" worktree add --detach "$wt" "$BRANCH" >/dev/null 2>&1 \
+        || git -C "$main" worktree add --detach "$wt" "origin/$BRANCH" >/dev/null 2>&1 \
+        || die "$proj: нет ветки «$BRANCH» — ни локально, ни на origin"
+    ok "$wt"
+}
+
+# npm ci на свежее дерево — минута-две, один раз на ветку. В основном дереве
+# ничего не ставим: там зависимости уже стоят, и тихая переустановка чужого
+# node_modules — не то, чего ждут от команды запуска.
+ensure_deps() {
+    local t="$1"
+    [[ -f "$t/package.json" ]] || return 0
+    [[ -d "$t/node_modules" ]] && return 0
+    say "$(basename "$t"): npm ci"
+    (cd "$t" && npm ci) || die "npm ci не прошёл в $t"
+}
+
+for app in "${PLAN[@]}"; do prepare_tree "$app"; done
+if [[ -n "$BRANCH" && "$MODE" == run ]]; then
+    declare -A SEEN_TREE=()
+    for app in "${PLAN[@]}"; do
+        t="${TREE[$app]}"
+        [[ -n "${SEEN_TREE[$t]:-}" ]] && continue
+        SEEN_TREE["$t"]=1
+        ensure_deps "$t"
+    done
+fi
+
+# ------------------------------------------------------------------ окружение
+
+# Эфемерный секрет на один запуск. В файлы не пишется и в репозиторий не
+# попадает: следующий запуск выдаст другой. Так локальная админка перестаёт
+# спрашивать пароль в консоли, не заводя постоянного секрета на диске.
+#
+# Обрезка делается в bash, а НЕ вторым `| head -c 24`. Классическое
+# `tr -dc … </dev/urandom | head -c 24` под `set -o pipefail` валит скрипт:
+# head закрывает трубу, tr получает SIGPIPE и возвращает 141, pipefail тянет
+# это наружу — и раннер молча умирал ровно на цели с секретами, не сказав ни
+# слова. Здесь источник конечный, читается целиком, и труба не рвётся.
+gen_secret() {
+    local raw
+    raw="$(LC_ALL=C tr -dc 'A-Za-z0-9' < <(head -c 512 /dev/urandom))"
+    printf '%s' "${raw:0:24}"
+}
+
+declare -A GENERATED
+expand() {
+    local app="$1" s="$2"
+    s="${s//%PORT%/${PORT[$app]}}"
+    s="${s//%DIR%/$(nat "${TREE[$app]}")}"
+    s="${s//%MAIN%/$(nat "${DIR_OF[$app]}")}"
+    s="${s//%KIT%/$(nat "$KIT_DIR")}"
+    printf '%s' "$s"
+}
+
+# Значения секретов заводятся ЗДЕСЬ, а не по дороге в target_env.
+#
+# target_env читают через подстановку процесса (`< <(target_env …)`), а это
+# подоболочка: присваивание внутри неё до вызывающего не доходит. Секрет,
+# сгенерированный там, уезжал бы в окружение сервиса и оставался неизвестным
+# тому, кто его печатает, — то есть пароль от админки узнать было бы неоткуда.
+ensure_secrets() {
+    local app="$1" name
+    IFS=';' read -ra names <<<"${SECRETS[$app]}"
+    for name in "${names[@]}"; do
+        name="${name// /}"; [[ -n "$name" ]] || continue
+        [[ -n "${GENERATED[$app.$name]:-}" ]] || GENERATED["$app.$name"]="$(gen_secret)"
+    done
+}
+
+# Переменные цели: RUN_ENV плюс сгенерированные секреты. Возвращает строки
+# ИМЯ=значение, по одной на строку. Требует, чтобы ensure_secrets уже отработал.
+target_env() {
+    local app="$1" pair name
+    IFS=';' read -ra pairs <<<"$(expand "$app" "${ENVK[$app]}")"
+    for pair in "${pairs[@]}"; do
+        pair="${pair#"${pair%%[![:space:]]*}"}"
+        [[ -n "$pair" ]] || continue
+        printf '%s\n' "$pair"
+    done
+    [[ "${2:-}" == "--no-secrets" ]] && return 0
+    IFS=';' read -ra names <<<"${SECRETS[$app]}"
+    for name in "${names[@]}"; do
+        name="${name// /}"; [[ -n "$name" ]] || continue
+        printf '%s=%s\n' "$name" "${GENERATED[$app.$name]:-}"
+    done
+}
+
+# ------------------------------------------------------------------ --dry-run
+
+if [[ "$MODE" == dry ]]; then
+    say "План запуска${BRANCH:+ (ветка $BRANCH)}"
+    i=0
+    for app in "${PLAN[@]}"; do
+        i=$(( i + 1 ))
+        printf '\n%s%d. %s%s\n' "$BLD" "$i" "$app" "$RST"
+        printf '   каталог  %s\n' "${TREE[$app]}${DIRK[$app]:+/${DIRK[$app]}}"
+        printf '   команда  %s\n' "$(expand "$app" "${CMD[$app]}")"
+        [[ -n "${PORT[$app]}" ]] && printf '   порт     %s%s\n' \
+            "${PORT[$app]}" "${HEALTH[$app]:+  проверка ${HEALTH[$app]}}"
+        [[ -n "${NEEDS[$app]}" ]] && printf '   раньше   %s\n' "${NEEDS[$app]}"
+        # Секреты в плане показываются именами, а не значениями: план не
+        # запускает ничего, а сгенерированное сейчас всё равно не совпало бы с
+        # тем, что получит настоящий запуск.
+        while IFS= read -r line; do
+            [[ -n "$line" ]] || continue
+            printf '   env      %s\n' "$line"
+        done < <(target_env "$app" --no-secrets)
+        IFS=';' read -ra dry_names <<<"${SECRETS[$app]}"
+        for name in "${dry_names[@]}"; do
+            name="${name// /}"; [[ -n "$name" ]] || continue
+            printf '   env      %s%s=(эфемерный, выдаётся при запуске)%s\n' "$DIM" "$name" "$RST"
+        done
+        [[ -n "${NOTE[$app]}" ]] && printf '   %s%s%s\n' "$YEL" "${NOTE[$app]}" "$RST"
+    done
+    echo
+    printf '%sСухой прогон: ничего не запущено и не создано.%s\n' "$DIM" "$RST"
+    exit 0
+fi
+
+# ------------------------------------------------------------------ процессы
+
+# Гасим ПО ПОРТУ, а не по PID родителя, и это не перестраховка. `go run`
+# компилирует бинарь во временный каталог и запускает его отдельным
+# процессом: убийство самого `go run` оставляет сироту, которая продолжает
+# держать порт. То же самое делает npm со своим шеллом. По порту гарантированно
+# находится тот, кто мешает следующему запуску.
+#
+# БЕЗ `-p TCP`, И ЭТО НЕ МЕЛОЧЬ. На Windows этот ключ ограничивает выдачу
+# ЧЕТВЁРТЫМ протоколом: слушатель на [::1]:5173 в неё не попадает вовсе.
+# Vite и Astro на Windows биндятся на `localhost`, а он разрешается в ::1
+# раньше, чем в 127.0.0.1, — то есть именно тот случай, который проверка
+# обязана видеть. Без этого раннер объявлял порт свободным, запускал сервис,
+# тот падал с «Port is already in use», и виноватым выглядел он, а не проверка.
+pids_on_port() {
+    local port="$1"
+    if (( WIN )); then
+        MSYS_NO_PATHCONV=1 netstat -ano 2>/dev/null \
+            | awk -v p="$port" '$1 == "TCP" && $4 == "LISTENING" && $2 ~ (":" p "$") && $5 != "0" { print $5 }' \
+            | sort -u
+    elif command -v lsof >/dev/null 2>&1; then
+        lsof -t -sTCP:LISTEN -i "tcp:$port" 2>/dev/null || true
+    elif command -v fuser >/dev/null 2>&1; then
+        fuser -n tcp "$port" 2>/dev/null | tr -s ' ' '\n' | grep -E '^[0-9]+$' || true
+    fi
+}
+
+# ДВА разных убийства, и путать их нельзя.
+#
+# Свои процессы раннер знает по $BASHPID — это идентификатор MSYS, и на
+# Windows он НЕ совпадает с идентификатором Windows. `taskkill /PID` с ним
+# либо не найдёт ничего, либо попадёт в постороннюю программу с таким же
+# номером. Своих гасит kill из MSYS, который эти номера и раздаёт.
+kill_child() { kill -TERM "$1" 2>/dev/null || true; }
+
+# А вот netstat отдаёт как раз идентификаторы Windows, и они понятны только
+# taskkill. /T — вместе с деревом: `go run` компилирует бинарь и запускает
+# его отдельным процессом, так что порт держит внук, а не сын.
+#
+# Ключи пишутся ОДНОЙ косой чертой, а защищает их MSYS_NO_PATHCONV=1. Удвоение
+# (`//PID`) — распространённый и неверный обходной приём: MSYS оставляет такой
+# аргумент как есть, и taskkill отвергает его как неизвестный параметр, тихо
+# не убивая ничего. Проверено руками: с `//PID` — «неправильный параметр», с
+# `/PID` и MSYS_NO_PATHCONV — «процесс завершён».
+kill_port_pid() {
+    if (( WIN )); then
+        MSYS_NO_PATHCONV=1 taskkill /PID "$1" /T /F >/dev/null 2>&1 || true
+    else
+        kill -TERM "$1" 2>/dev/null || true
+    fi
+}
+
+port_free() { [[ -z "$(pids_on_port "$1")" ]]; }
+
+free_port() {
+    local port="$1" p i
+    port_free "$port" && return 0
+    for p in $(pids_on_port "$port"); do kill_port_pid "$p"; done
+    for (( i = 0; i < 20; i++ )); do
+        port_free "$port" && return 0
+        sleep 0.25
+    done
+    # На Linux TERM мог быть проигнорирован — добиваем.
+    if (( ! WIN )); then
+        for p in $(pids_on_port "$port"); do kill -KILL "$p" 2>/dev/null || true; done
+        sleep 0.5
+    fi
+    port_free "$port"
+}
+
+declare -a STARTED=() STARTED_PORTS=()
+declare -A PID_OF
+SHUTTING=0
+TMP="$(mktemp -d)"
+
+stop_all() {
+    (( SHUTTING )) && return 0
+    SHUTTING=1
+    printf '\n'
+    say "Остановка"
+    local app p
+    for app in "${STARTED[@]}"; do
+        p="${PID_OF[$app]:-}"
+        [[ -n "$p" ]] && kill_child "$p"
+    done
+    for p in "${STARTED_PORTS[@]}"; do
+        if free_port "$p"; then ok "порт $p свободен"
+        else warn "порт $p всё ещё занят: $(pids_on_port "$p" | tr '\n' ' ')"; fi
+    done
+    rm -rf "$TMP"
+    ok "всё остановлено"
+}
+trap 'stop_all; exit 0' INT TERM
+trap 'stop_all' EXIT
+
+PALETTE=($'\033[36m' $'\033[35m' $'\033[32m' $'\033[33m' $'\033[34m' $'\033[91m')
+[[ -t 1 && -z "${NO_COLOR:-}" ]] || PALETTE=('' '' '' '' '' '')
+
+# Готовность: порт слушает. Проверка через /dev/tcp, а не curl — сервис может
+# отвечать не по HTTP, а вопрос здесь ровно один: поднялся ли он.
+#
+# Вторая проверка, через таблицу соединений, нужна из-за IPv6: `localhost` на
+# Windows разрешается в ::1 раньше, чем в 127.0.0.1, и dev-серверы Vite и
+# Astro садятся именно туда. Соединение на 127.0.0.1 в такой сервис не
+# проходит, и без второй проверки раннер две минуты ждал бы порт, который уже
+# открыт.
+wait_ready() {
+    local app="$1" port="$2" i deadline=240   # 240 × 0.5 c = 2 минуты
+    for (( i = 0; i < deadline; i++ )); do
+        [[ -n "${PID_OF[$app]:-}" ]] && ! kill -0 "${PID_OF[$app]}" 2>/dev/null && return 1
+        if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then exec 3<&- 3>&-; return 0; fi
+        port_free "$port" || return 0
+        sleep 0.5
+    done
+    return 1
+}
+
+# Живость: RUN_HEALTH на уже открытом порту. Отдельно от готовности, потому
+# что отвечает на другой вопрос — не «процесс поднялся», а «отдаёт то, что
+# должен». Провал не валит запуск: сервис может быть жив, а путь опечатан.
+check_health() {
+    local app="$1"
+    # localhost, а не 127.0.0.1: сервис может слушать только ::1 (см.
+    # wait_ready), и тогда проверка по четвёртому адресу соврала бы про
+    # мёртвый сервис. Браузер ходит по этому же имени.
+    local url="http://localhost:${PORT[$app]}${HEALTH[$app]}" code
+    command -v curl >/dev/null 2>&1 || return 0
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url" 2>/dev/null || true)"
+    if [[ "$code" == "200" ]]; then ok "$app: $url отвечает 200"
+    else warn "$app: $url ответил «${code:-нет ответа}»"; fi
+}
+
+start_one() {
+    local app="$1" idx="$2"
+    local tree="${TREE[$app]}" wd port cmd colour
+    wd="$tree${DIRK[$app]:+/${DIRK[$app]}}"
+    [[ -d "$wd" ]] || die "$app: нет каталога $wd"
+    port="${PORT[$app]}"
+    cmd="$(expand "$app" "${CMD[$app]}")"
+    colour="${PALETTE[$(( idx % ${#PALETTE[@]} ))]}"
+
+    say "$app"
+    [[ -n "${NOTE[$app]}" ]] && warn "${NOTE[$app]}"
+    ensure_secrets "$app"
+
+    # Однократная цель — не сервис, а шаг подготовки: агент статуса собирает
+    # данные и выходит. Следить за ней нечего, ждать — обязательно: страница,
+    # которой она готовит summary.json, стартует после неё.
+    if [[ "${ONESHOT[$app]}" == "1" ]]; then
+        local -a envv1=()
+        local rc=0
+        while IFS= read -r line; do [[ -n "$line" ]] && envv1+=("$line"); done < <(target_env "$app")
+        # set +e, а не `|| true`: код возврата берётся у ПЕРВОГО звена
+        # конвейера (у второго он всегда нулевой — цикл печати завершается
+        # успешно и когда цель упала), а любая команда после конвейера
+        # перетирает PIPESTATUS собственным результатом.
+        set +e
+        (
+            cd "$wd" || exit 1
+            if (( ${#envv1[@]} )); then env "${envv1[@]}" bash -c "$cmd" 2>&1
+            else bash -c "$cmd" 2>&1; fi
+        ) | while IFS= read -r line; do
+                printf '%s%s%s %s\n' "$colour" "$(pad "$app" 18)" "$RST" "$line"
+            done
+        rc=${PIPESTATUS[0]}
+        set -e
+        (( rc == 0 )) || die "$app: завершился с кодом $rc"
+        ok "$app: отработал"
+        return 0
+    fi
+
+    if [[ -n "$port" ]]; then
+        if ! port_free "$port"; then
+            if (( FORCE )); then
+                warn "порт $port занят — освобождаю (--force)"
+                free_port "$port" || die "$app: порт $port освободить не удалось"
+            else
+                die "$app: порт $port занят процессом $(pids_on_port "$port" | tr '\n' ' ')— это чужой процесс или остаток прошлого запуска. Повторите с --force"
+            fi
+        fi
+    fi
+
+    local -a envv=()
+    while IFS= read -r line; do [[ -n "$line" ]] && envv+=("$line"); done < <(target_env "$app")
+
+    # Секреты называем вслух: они эфемерные, живут до Ctrl-C и нужны прямо
+    # сейчас — иначе в локальную админку не войти. Прятать их было бы
+    # безопасностью напоказ: пароль всё равно пришлось бы откуда-то взять.
+    local name
+    IFS=';' read -ra names <<<"${SECRETS[$app]}"
+    for name in "${names[@]}"; do
+        name="${name// /}"; [[ -n "$name" ]] || continue
+        printf '%s  %s=%s%s\n' "$DIM" "$name" "${GENERATED[$app.$name]}" "$RST"
+    done
+
+    # Вывод идёт через префикс, а не как есть: при ферме из трёх сервисов без
+    # имени в строке непонятно, кто именно ругается.
+    #
+    # Идентификатор берётся из самого процесса, а не из `$!`. В конвейере `$!`
+    # указывает на ПОСЛЕДНЮЮ команду — то есть на цикл, печатающий префиксы, а
+    # не на сервис. Убийство такого «pid» останавливало бы вывод, оставляя
+    # сервис работать.
+    local pidfile="$TMP/$app.pid"
+    (
+        cd "$wd" || exit 1
+        printf '%s' "$BASHPID" > "$pidfile"
+        if (( ${#envv[@]} )); then exec env "${envv[@]}" bash -c "$cmd" 2>&1
+        else exec bash -c "$cmd" 2>&1; fi
+    ) | while IFS= read -r line; do
+            printf '%s%s%s %s\n' "$colour" "$(pad "$app" 18)" "$RST" "$line"
+        done &
+    local i=0
+    while [[ ! -s "$pidfile" && $i -lt 100 ]]; do sleep 0.05; i=$(( i + 1 )); done
+    PID_OF["$app"]="$(cat "$pidfile" 2>/dev/null || true)"
+    [[ -n "${PID_OF[$app]}" ]] || die "$app: процесс не стартовал"
+    STARTED+=("$app")
+    if [[ -n "$port" ]]; then STARTED_PORTS+=("$port"); fi
+
+    if [[ -n "$port" ]]; then
+        if wait_ready "$app" "$port"; then
+            ok "$app: http://localhost:$port"
+            # Полноценное `if`, а не `[[ … ]] && check_health`: у цели без
+            # RUN_HEALTH такая строка возвращает единицу, становится
+            # результатом всей функции, и вызывающий цикл под `set -e`
+            # обрывает запуск — молча, на первой же цели без проверки
+            # живости. Симптом выглядел как «поднял metro и сразу всё
+            # остановил», а причина была в коде возврата пустого условия.
+            if [[ -n "${HEALTH[$app]}" ]]; then check_health "$app"; fi
+        else
+            die "$app: за две минуты порт $port так и не открылся"
+        fi
+    else
+        ok "$app: запущен (порта нет)"
+    fi
+    return 0
+}
+
+say "Запуск${BRANCH:+ на ветке $BRANCH}"
+i=0
+for app in "${PLAN[@]}"; do start_one "$app" "$i"; i=$(( i + 1 )); done
+
+declare -a LIVE=()
+for app in "${PLAN[@]}"; do
+    [[ "${ONESHOT[$app]}" == "1" ]] || LIVE+=("$app")
+done
+
+# Только однократные цели — держать нечего, и висеть в ожидании было бы
+# враньём про то, что что-то работает.
+if ! (( ${#LIVE[@]} )); then
+    say "Готово"
+    exit 0
+fi
+
+say "Поднято"
+for app in "${LIVE[@]}"; do
+    if [[ -n "${PORT[$app]}" ]]; then
+        printf '  %s%s%s  http://localhost:%s\n' "$BLD" "$(pad "$app" 20)" "$RST" "${PORT[$app]}"
+    else
+        printf '  %s%s%s  %s(без порта)%s\n' "$BLD" "$(pad "$app" 20)" "$RST" "$DIM" "$RST"
+    fi
+done
+printf '\n%sCtrl-C — остановить всё.%s\n\n' "$DIM" "$RST"
+
+# Все слушаемые сейчас порты — одним снимком. Отдельный netstat на каждую цель
+# каждые две секунды заметно греет процессор на Windows, а ответ на вопрос
+# всё равно один и тот же.
+listening_ports() {
+    if (( WIN )); then
+        MSYS_NO_PATHCONV=1 netstat -ano 2>/dev/null \
+            | awk '$1 == "TCP" && $4 == "LISTENING" { n = split($2, a, ":"); print a[n] }' | sort -u
+    elif command -v lsof >/dev/null 2>&1; then
+        lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | awk 'NR > 1 { n = split($9, a, ":"); print a[n] }' | sort -u
+    else
+        ss -ltn 2>/dev/null | awk 'NR > 1 { n = split($4, a, ":"); print a[n] }' | sort -u
+    fi
+}
+
+# ЖИВОСТЬ ЦЕЛИ С ПОРТОМ — ЭТО ПОРТ, А НЕ PID ЗАПУЩЕННОГО ПРОЦЕССА.
+#
+# Astro 7, обнаружив, что вывод идёт не в терминал, уводит dev-сервер в фон и
+# завершает родителя: `npm run dev` выходит с нулём, а страница продолжает
+# отдаваться (в логе — «Dev server running … Stop: astro dev stop»). По pid
+# это неотличимо от падения, и раннер честно останавливал ферму через минуту
+# после того, как поднял её. `go run` устроен зеркально: родитель жив, а порт
+# держит скомпилированный внук.
+#
+# Порт отвечает на нужный вопрос в обоих случаях — и ровно по нему цель потом
+# гасится. Целям без порта (клиент лаунчера) остаётся pid: другого признака у
+# них нет.
+alive() {
+    local app="$1"
+    if [[ -n "${PORT[$app]}" ]]; then
+        grep -qx -- "${PORT[$app]}" <<<"$SNAPSHOT"
+    else
+        kill -0 "${PID_OF[$app]}" 2>/dev/null
+    fi
+}
+
+# Ферма, в которой тихо отвалился один сервис, хуже упавшей целиком: страница
+# открывается, а половина запросов уходит в никуда, и выясняется это через
+# полчаса.
+while :; do
+    SNAPSHOT="$(listening_ports)"
+    for app in "${LIVE[@]}"; do
+        if ! alive "$app"; then
+            warn "$app завершился — останавливаю остальных"
+            stop_all
+            exit 1
+        fi
+    done
+    sleep 2
+done
