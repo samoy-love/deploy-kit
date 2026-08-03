@@ -423,7 +423,7 @@ bash bin/changelog --repo . --link-base https://github.com/tr0llex/deploy-kit
 | `bin/dk` | CLI: состояние прода, выкатка, откат |
 | `bin/deploy` | одна локальная выкатка тем же путём, что и CI |
 | `bin/changelog` | список изменений для сообщения о релизе — один на все пути выкатки |
-| `bin/install-server` | выкладывает `server/*.sh` в `/opt/deploy-kit` |
+| `bin/install-server` | выкладывает `server/*.sh` в `/opt/deploy-kit` и ничейное из `nginx/` |
 | `server/release.sh` | распаковать → бэкап → переключить → проверить → откатить |
 | `server/rollback.sh` | ручной откат на предыдущий или названный релиз |
 | `server/preflight.sh` | место на диске, `nginx -t`, состояние юнитов, владелец |

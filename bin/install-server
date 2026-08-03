@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Обновление серверной части deploy-kit: скриптов в /opt/deploy-kit, общих
-# сниппетов nginx в /etc/nginx/snippets, файлов уровня http в /etc/nginx/conf.d
-# и — только по явному флагу — правила sudo в /etc/sudoers.d.
+# сниппетов nginx в /etc/nginx/snippets, файлов уровня http в /etc/nginx/conf.d,
+# ничейного catch-all в /etc/nginx/sites-available и — только по явному флагу —
+# правила sudo в /etc/sudoers.d.
 #
 #   install-server                          показать расхождения, ничего не менять
 #   install-server --apply                  выложить из репозитория на сервер
@@ -74,6 +75,35 @@ CONFD=()
 while IFS= read -r c; do CONFD+=("$(basename "$c")"); done \
     < <(find "$KIT_DIR/nginx/conf.d" -maxdepth 1 -name 'samoylove-*.conf' | sort)
 
+# nginx/sites — единственный каталог, который возится ПЕРЕЧИСЛЕНИЕМ, а не
+# глобом, и это ровно та же граница, что у сниппетов и conf.d, только видная с
+# другой стороны. Критерий здесь один и он написан выше: возим то, у чего нет
+# проекта-владельца. У семи из восьми конфигов сайтов владелец есть — их файл
+# перезаписывает пайплайн своего репозитория, и глоб по каталогу означал бы,
+# что install-server и чужой пайплайн пишут один файл наперегонки.
+#
+# У 000-default.conf владельца нет и быть не может: это общесерверный catch-all
+# с ssl_reject_handshake, который закрывает чужие домены, направленные на этот
+# IP, и запросы по голому IP. Он не принадлежит ни одному сайту, потому что
+# защищает их все. Пока его не возил никто, репозиторий и сервер расходились в
+# самом опасном месте молча: правка здесь не доезжала, а увидеть это было
+# нечем — ни выкатки, ни сверки.
+#
+# Файл остаётся в nginx/sites и едет в /etc/nginx/sites-available с --enable,
+# то есть ложится ТУДА ЖЕ, где лежал всегда. Переезд в conf.d (там как раз
+# живёт ничейное) не отвергнут рассуждением, а проверен: весь набор из восьми
+# сайтов поднимался в контейнере с nginx 1.24 обоими способами, и поведение
+# совпало до кода ответа — неизвестный домен и голый IP получают обрыв, TLS без
+# совпавшего SNI отклоняется, настоящие сайты отвечают сами. Разницу опыт
+# показать способен: без catch-all неизвестный домен получает 301 от
+# chillhub-launcher, а handshake проходит.
+#
+# То есть переезд ничего не улучшал и кое-что ломал: файл выпал бы из задачи CI
+# (она идёт по nginx/sites/*.conf), из правила про default_server в
+# ci/nginx-check.sh (catch-all там опознаётся по имени пути) и потребовал бы
+# переименования под glob samoylove-*. Остаётся на месте.
+SITES=(000-default.conf)
+
 # Правило sudo для учётки CI. Едет только по явному --with-sudoers: оно меняет
 # ПРАВА на хосте, а не код пайплайна, и применяется в рамках ручной миграции на
 # отдельного пользователя. Подробности и порядок шагов — в шапке самого файла.
@@ -106,6 +136,7 @@ if [[ "${SKIP_BRANCH_CHECK:-0}" != "1" ]]; then
     for f in "${FILES[@]}";    do CHECK+=("server/$f"); done
     for s in "${SNIPPETS[@]}"; do CHECK+=("nginx/snippets/$s"); done
     for c in "${CONFD[@]}";    do CHECK+=("nginx/conf.d/$c"); done
+    for n in "${SITES[@]}";    do CHECK+=("nginx/sites/$n"); done
     (( WITH_SUDOERS )) && CHECK+=("server/sudoers.d/deploy-kit")
     for p in "${CHECK[@]}"; do
         if ! git -C "$KIT_DIR" diff --quiet origin/main -- "$p" 2>/dev/null; then
@@ -164,6 +195,21 @@ for c in "${CONFD[@]}"; do
     fi
 done
 
+printf '\n%sЧто на сервере /etc/nginx/sites-available:%s\n' "$BLD" "$RST"
+ndrift=()
+for n in "${SITES[@]}"; do
+    lh="$(tr -d '\r' < "$KIT_DIR/nginx/sites/$n" | sha256sum | cut -c1-12)"
+    rh="$(remote_hash "/etc/nginx/sites-available/$n")"
+    if [[ -z "$rh" ]]; then
+        printf '  %-34s %sнет на сервере%s\n' "$n" "$YEL" "$RST"; ndrift+=("$n")
+    elif [[ "$lh" == "$rh" ]]; then
+        printf '  %-34s %sсовпадает%s\n' "$n" "$DIM" "$RST"
+    else
+        printf '  %-34s %sразошлось%s (сервер %s, репозиторий %s)\n' "$n" "$RED" "$RST" "$rh" "$lh"
+        ndrift+=("$n")
+    fi
+done
+
 sudoers_drift=0
 if (( WITH_SUDOERS )); then
     [[ -f "$SUDOERS_SRC" ]] || die "нет $SUDOERS_SRC"
@@ -180,7 +226,7 @@ if (( WITH_SUDOERS )); then
     fi
 fi
 
-if (( ${#drift[@]} == 0 && ${#sdrift[@]} == 0 && ${#cdrift[@]} == 0 && sudoers_drift == 0 )); then
+if (( ${#drift[@]} == 0 && ${#sdrift[@]} == 0 && ${#cdrift[@]} == 0 && ${#ndrift[@]} == 0 && sudoers_drift == 0 )); then
     echo; ok "сервер и репозиторий совпадают"
     exit 0
 fi
@@ -190,6 +236,7 @@ if ! (( APPLY )); then
     if (( ${#drift[@]}  )); then warn "расходятся скрипты: ${drift[*]}"; fi
     if (( ${#sdrift[@]} )); then warn "расходятся сниппеты: ${sdrift[*]}"; fi
     if (( ${#cdrift[@]} )); then warn "расходятся conf.d: ${cdrift[*]}"; fi
+    if (( ${#ndrift[@]} )); then warn "расходятся сайты без владельца: ${ndrift[*]}"; fi
     if (( sudoers_drift  )); then warn "расходится sudoers.d/deploy-kit"; fi
     printf '%sВыложить: install-server --apply%s%s\n' "$DIM" \
         "$( (( WITH_SUDOERS )) && printf ' --with-sudoers' )" "$RST"
@@ -251,6 +298,25 @@ for c in "${cdrift[@]}"; do
         exit \$rc" || die "conf.d/$c не встал — nginx-apply.sh откатил изменения"
 done
 if (( ${#cdrift[@]} )); then ok "conf.d выложены: ${cdrift[*]}"; fi
+
+# Сайты без владельца — тем же nginx-apply.sh, но С --enable: файл ложится в
+# sites-available, а работает только через симлинк в sites-enabled, и делать
+# этот симлинк руками означало бы снова держать половину состояния вне
+# репозитория. Идут ПОСЛЕ сниппетов и conf.d: конфиг сайта их подключает, и на
+# сервере без них он не прошёл бы nginx -t.
+#
+# Порядок разбора при этом не меняется ни на шаг: имя файла прежнее, каталог
+# прежний, префикс 000- по-прежнему ставит catch-all первым в sites-enabled.
+for n in "${ndrift[@]}"; do
+    "${SCP[@]}" "$KIT_DIR/nginx/sites/$n" "$DEPLOY_USER@$DEPLOY_HOST:/tmp/$n"
+    "${SSH[@]}" "sed -i 's/\r\$//' '/tmp/$n'
+        sudo $DEST/nginx-apply.sh --app deploy-kit --conf '/tmp/$n' \
+             --dest '/etc/nginx/sites-available/$n' --enable
+        rc=\$?
+        rm -f '/tmp/$n'
+        exit \$rc" || die "сайт $n не встал — nginx-apply.sh откатил изменения"
+done
+if (( ${#ndrift[@]} )); then ok "сайты без владельца выложены: ${ndrift[*]}"; fi
 
 # Правило sudo. Порядок здесь важнее, чем везде выше: невалидный файл в
 # /etc/sudoers.d ломает sudo ЦЕЛИКОМ, а чинить его без sudo уже нечем — root
