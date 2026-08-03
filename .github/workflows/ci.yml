@@ -146,6 +146,17 @@ jobs:
           command -v jq >/dev/null || sudo apt-get install -y -qq jq
           bash ci/contract-test.sh
 
+      # install_units — единственное место, где выкатка пишет в
+      # /etc/systemd/system, и делает это от root. Цена ошибки тут не «список
+      # изменений выглядит криво», а «служба не запускается»: не тот путь, не
+      # созданный каталог, не сделанный daemon-reload. Половина поведения
+      # функции — это поведение глобов, cmp и install на файловой системе,
+      # чтением такое не проверяется. Набор поднимает поддельный
+      # /etc/systemd/system и гоняет по нему НАСТОЯЩУЮ функцию из lib.sh.
+      - name: Тесты установки юнитов systemd
+        timeout-minutes: 5
+        run: bash ci/units-test.sh
+
       # Справка — часть контракта: dk help читают чаще, чем исходники.
       - name: dk help не падает
         run: bash bin/dk help > /dev/null

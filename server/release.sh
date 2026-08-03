@@ -98,7 +98,14 @@ if (( DRY )); then
     echo "текущий релиз:  $([[ -L $CURRENT ]] && basename "$(readlink -f "$CURRENT")" || echo 'нет')"
     [[ -n "$UNIT" ]]       && echo "перезапуск:     $UNIT"
     # Каталог релиза ещё не распакован — смотрим прямо в архив.
-    UNITS_IN_ARCHIVE="$(tar -tzf "$ARCHIVE" 2>/dev/null | grep -E '^([.]/)?systemd/.' | xargs -r -n1 basename | tr '\n' ' ' || true)"
+    #
+    # Печатаем путь ОТНОСИТЕЛЬНО systemd/, а не basename: дополнение живёт в
+    # подкаталоге, и от basename в плане оставалось «snakes.service.d
+    # 10-metrics.conf» — два непонятных имени вместо одного понятного
+    # «snakes.service.d/10-metrics.conf». Сами каталоги (строки со слэшем на
+    # конце) из списка выброшены: ставятся файлы.
+    UNITS_IN_ARCHIVE="$(tar -tzf "$ARCHIVE" 2>/dev/null \
+        | sed -n 's#^\(\./\)\?systemd/##p' | grep -v '/$' | grep . | tr '\n' ' ' || true)"
     if [[ -n "${UNITS_IN_ARCHIVE// /}" ]]; then
         echo "юниты:          из релиза ($UNITS_IN_ARCHIVE)"
     else
