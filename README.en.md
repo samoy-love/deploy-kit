@@ -446,7 +446,7 @@ executable.
 | `bin/dk` | CLI: production state, deploy, rollback |
 | `bin/deploy` | one local deploy, the same path CI takes |
 | `bin/changelog` | the list of changes for a release message — one for every deployment path |
-| `bin/install-server` | ships `server/*.sh` to `/opt/deploy-kit` |
+| `bin/install-server` | ships `server/*.sh` to `/opt/deploy-kit` and the ownerless parts of `nginx/` |
 | `server/release.sh` | unpack → backup → switch → verify → roll back |
 | `server/rollback.sh` | manual rollback to the previous or a named release |
 | `server/preflight.sh` | disk space, `nginx -t`, unit state, release owner |
