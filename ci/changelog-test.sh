@@ -62,7 +62,7 @@ commit() { # commit <repo> <subject>
 # run <repo> [args…] → stdout в $OUT, stderr в $ERR, код в $RC
 run() {
     local d="$1"; shift
-    OUT="$("$CL" --repo "$d" "$@" 2>"$TMP/err")"; RC=$?
+    OUT="$("$BASH" "$CL" --repo "$d" "$@" 2>"$TMP/err")"; RC=$?
     ERR="$(cat "$TMP/err")"
 }
 
@@ -551,7 +551,7 @@ expect_rc0
     && ok "без базы — прежняя срезанная форма" || bad "без базы вывод изменился: «$OUT»"
 (( $(anchors "$OUT") == 0 )) && ok "без базы тегов нет вовсе" || bad "без базы появился тег:"$'\n'"$OUT"
 # И то же самое через переменную окружения — оба пути дают одно.
-OUT="$(DK_CHANGELOG_LINK_BASE="$BASE" "$CL" --repo "$R" --no-header 2>/dev/null)"
+OUT="$(DK_CHANGELOG_LINK_BASE="$BASE" "$BASH" "$CL" --repo "$R" --no-header 2>/dev/null)"
 expect_has "href=\"$BASE/pull/21\""
 
 case_ "6l. Ссылка ставится ТОЛЬКО на хвостовой номер"
@@ -871,7 +871,7 @@ cat > "$TMP/caller.sh" <<'EOF'
 set -Eeuo pipefail
 CL="$1"; REPO="$2"
 TEXT="🚀 <b>app</b> выкачен"
-CHANGES="$("$CL" --repo "$REPO" 2>/dev/null)"
+CHANGES="$(bash "$CL" --repo "$REPO" 2>/dev/null)"
 [ -n "$CHANGES" ] && TEXT="$TEXT
 $CHANGES"
 printf '%s\n' "$TEXT"
