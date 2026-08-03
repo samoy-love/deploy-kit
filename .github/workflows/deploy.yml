@@ -156,7 +156,11 @@ jobs:
           if [ "$STATUS" = "success" ]; then
             CHANGES="$(bash bin/changelog --repo "$GITHUB_WORKSPACE" --since "${BEFORE:-}" --all \
                          --link-base "$LINK_BASE" || true)"
-            TEXT=$(printf '🧰 <b>deploy-kit</b> выложен на сервер\n<code>%s</code>\nсерверные скрипты, сниппеты nginx и conf.d' "$VERSION")
+            # Перечисление обязано совпадать с тем, что публикует
+            # install-server: сообщение о выкладке — единственное, что читатель
+            # о ней узнает, и «сниппеты и conf.d» после добавления catch-all
+            # означало бы «в общий вход nginx мы не ходили», а мы ходили.
+            TEXT=$(printf '🧰 <b>deploy-kit</b> выложен на сервер\n<code>%s</code>\nсерверные скрипты, сниппеты nginx, conf.d и общий catch-all' "$VERSION")
           else
             TEXT=$(printf '💥 <b>deploy-kit</b> — выкладка провалена\n<code>%s</code>\n<a href="%s">лог прогона</a>' "$VERSION" "$RUN_URL")
           fi
