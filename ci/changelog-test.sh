@@ -34,9 +34,67 @@ trap 'rm -rf "$TMP"' EXIT
 pass=0; fail=0
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; pass=$(( pass + 1 )); }
 bad()  { printf '  \033[31m✗\033[0m %s\n' "$*" >&2; fail=$(( fail + 1 )); }
-case_() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+case_() { printf '\n\033[1m%s\033[0m\n' "$*"; PREP_SAID=0; }
+
+# --- подготовка данных ------------------------------------------------------
+#
+# КОД ВОЗВРАТА GIT В ПОДГОТОВКЕ НЕ ИГНОРИРУЕТСЯ. Случай 15c однажды упал на
+# раннере GitHub с «пунктов 0, ожидалось 200», причём expect_rc0 и expect_utf8
+# в том же случае прошли: генератор отработал успешно и честно вернул пустой
+# список. Повторный прогон того же джоба без единой правки был зелёным.
+#
+# Разобрать тот прогон было нечем. Случай строит репозиторий циклом из двух
+# сотен git-вызовов, ни один код возврата не проверялся, stderr git уходил в
+# никуда — и «репозиторий не построился» выглядело ровно как «генератор
+# потерял все пункты». Это разные дефекты: первый чинят в тесте, второй — в
+# bin/changelog, и отличить их обязан сам тест, а не читатель лога через
+# неделю.
+#
+# Поэтому вся подготовка идёт через gitp: неудача называет себя сама, вместе
+# со stderr git, и считается провалом ровно там, где случилась.
+# Говорит один раз на случай. Репозитории строятся циклами по три-четыре
+# десятка коммитов, и если подготовка сломалась, ломается она обычно на каждом
+# витке: без этого счётчика провал одного случая давал бы сотню одинаковых
+# строк и три экрана справки git, за которыми не видно остальных случаев.
+# Провал случая от этого не теряется — «подготовка не удалась» и есть его
+# приговор, повторять его сорок раз незачем.
+PREP_SAID=0
+PREP_ERR="$TMP/prep-err"
+gitp() { # gitp <репозиторий> <аргументы git…>
+    local d="$1" rc; shift
+    # stdout подготовки не нужен никому: команды здесь меняют репозиторий, а не
+    # спрашивают его. Всё, что спрашивает, вызывает git напрямую и разбирает
+    # ответ само.
+    git -C "$d" "$@" >/dev/null 2>"$PREP_ERR"; rc=$?
+    (( rc == 0 )) && return 0
+    (( PREP_SAID )) && return "$rc"
+    PREP_SAID=1
+    # Три строки stderr, а не всё: на негодный аргумент git отвечает экраном
+    # справки, и в логе раннера он вытесняет то, ради чего его читают.
+    bad "подготовка не удалась: git $* — код $rc"$'\n'"    $(head -3 "$PREP_ERR")"
+    return "$rc"
+}
+
+# need_commits <репозиторий> <диапазон> <сколько> — проверка ПОДГОТОВКИ, а не
+# поведения генератора. Стоит там, где данные строятся длинным циклом: даже с
+# проверенным кодом возврата остаётся вопрос «сложилось ли то, о чём случай
+# собирается спрашивать», и ответ на него обязан прозвучать ДО запуска
+# генератора. Иначе пустой диапазон снова превратится в загадочный провал
+# утверждения о выводе.
+need_commits() {
+    local d="$1" range="$2" want="$3" got
+    got="$(git -C "$d" rev-list --count "$range" 2>"$PREP_ERR")"
+    [[ "$got" =~ ^[0-9]+$ ]] || got="git не ответил числом ($(head -1 "$PREP_ERR"))"
+    [[ "$got" == "$want" ]] && ok "подготовлено: в $range коммитов $got" \
+        || bad "подготовка не удалась: в $range $got, ожидалось $want"
+}
 
 # Одноразовый репозиторий. Никаких глобальных настроек и хуков.
+#
+# Тело здесь остаётся на голом git, а не на gitp: mkrepo зовут из подстановки
+# `R="$(mkrepo …)"`, то есть в подоболочке, и счётчик провалов из неё не
+# вернулся бы. Неудачный init от этого не потеряется — на нём споткнётся первый
+# же gitp в самом случае, уже в основной оболочке.
 mkrepo() {
     local d="$TMP/$1"; mkdir -p "$d"
     git -C "$d" init -q -b main
@@ -55,8 +113,14 @@ commit() { # commit <repo> <subject>
     # Каждый коммит трогает свой файл: иначе слияние веток в случае 5 упрётся
     # в конфликт, и коммита слияния, ради которого случай написан, не будет.
     printf '%s\n' "$N" > "$d/f$N.txt"
-    git -C "$d" add -A
-    git -C "$d" commit -q -F - <<< "$s"
+    gitp "$d" add -A
+    gitp "$d" commit -q -F - <<< "$s"
+}
+
+# Пустой коммит. Отдельно от commit(), потому что случай 15c делает их две
+# сотни: двести файлов в дереве были бы платой ни за что.
+commit_empty() { # commit_empty <репозиторий> <тема>
+    gitp "$1" commit -q --allow-empty -m "$2"
 }
 
 # run <repo> [args…] → stdout в $OUT, stderr в $ERR, код в $RC
@@ -106,14 +170,22 @@ run_t() {
 # одинаково плохи для того, кто читает лог выкатки.
 err_lines() { printf '%s\n' "$ERR" | grep -c . ; }
 
-expect_rc0()   { [[ "$RC" == 0 ]] && ok "код возврата 0" || bad "код возврата $RC, ожидался 0"; }
-expect_empty() { [[ -z "$OUT" ]] && ok "stdout пуст" || bad "stdout не пуст: $OUT"; }
-expect_has()   { [[ "$OUT" == *"$1"* ]] && ok "есть «$1»" || bad "нет «$1» в:"$'\n'"$OUT"; }
-expect_hasnt() { [[ "$OUT" != *"$1"* ]] && ok "нет «$1»" || bad "не должно быть «$1» в:"$'\n'"$OUT"; }
-expect_utf8()  { printf '%s' "$OUT" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 && ok "валидный UTF-8" || bad "битый UTF-8"; }
+# Провал утверждения о ВЫВОДЕ печатает ещё и stderr генератора. Генератор
+# объясняет каждое своё решение сам («нечего показывать (от переданной ревизии
+# v1.0.0)», «все коммиты диапазона отфильтрованы как шум», «показано 8 из 12»),
+# и ровно эта строка отвечает на вопрос, ради которого иначе приходится лезть в
+# исходник: показывать было нечего или обрезал предел. На нестабильном прогоне
+# раннера её отсутствие стоило целого разбирательства.
+bad_out() { bad "$*"$'\n'"    changelog в stderr: ${ERR:-—}"; }
+
+expect_rc0()   { [[ "$RC" == 0 ]] && ok "код возврата 0" || bad_out "код возврата $RC, ожидался 0"; }
+expect_empty() { [[ -z "$OUT" ]] && ok "stdout пуст" || bad_out "stdout не пуст: $OUT"; }
+expect_has()   { [[ "$OUT" == *"$1"* ]] && ok "есть «$1»" || bad_out "нет «$1» в:"$'\n'"$OUT"; }
+expect_hasnt() { [[ "$OUT" != *"$1"* ]] && ok "нет «$1»" || bad_out "не должно быть «$1» в:"$'\n'"$OUT"; }
+expect_utf8()  { printf '%s' "$OUT" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1 && ok "валидный UTF-8" || bad_out "битый UTF-8"; }
 expect_lines() { # expect_lines <n>
     local n; n="$(printf '%s\n' "$OUT" | grep -c '^• ')"
-    [[ "$n" == "$1" ]] && ok "пунктов: $n" || bad "пунктов $n, ожидалось $1"
+    [[ "$n" == "$1" ]] && ok "пунктов: $n" || bad_out "пунктов $n, ожидалось $1"
 }
 expect_bytes_le() {
     local n; n="$(printf '%s' "$OUT" | LC_ALL=C wc -c | tr -d ' ')"
@@ -187,7 +259,7 @@ expect_hasnt "…и ещё 27"
 case_ "2. Один тег — диапазон от тега"
 R="$(mkrepo onetag)"
 commit "$R" "старое до тега"
-git -C "$R" tag v1.0.0
+gitp "$R" tag v1.0.0
 commit "$R" "новое после тега один"
 commit "$R" "новое после тега два"
 run "$R"
@@ -196,9 +268,9 @@ expect_rc0; expect_has "новое после тега два"; expect_hasnt "с
 case_ "2a. Тег стоит ровно на HEAD — берётся предыдущий тег"
 R="$(mkrepo tag-on-head)"
 commit "$R" "до первого тега"
-git -C "$R" tag v1.0.0
+gitp "$R" tag v1.0.0
 commit "$R" "между тегами"
-git -C "$R" tag v1.1.0
+gitp "$R" tag v1.1.0
 run "$R"
 expect_rc0; expect_has "между тегами"; expect_hasnt "до первого тега"
 
@@ -207,7 +279,7 @@ R="$(mkrepo since)"
 commit "$R" "самый первый"
 BASE="$(git -C "$R" rev-parse HEAD)"
 commit "$R" "после базы один"
-git -C "$R" tag v2.0.0
+gitp "$R" tag v2.0.0
 commit "$R" "после базы два"
 run "$R" --since "$BASE"
 expect_rc0; expect_has "после базы один"; expect_has "после базы два"; expect_hasnt "самый первый"
@@ -236,7 +308,7 @@ R="$(mkrepo html)"
 commit "$R" "поднять go до 1.22 <-- важно & срочно"
 commit "$R" "убрать <b>жирный</b> из шаблона"
 printf 'тема первой строкой\nи её продолжение второй\n\nтело\n' > "$TMP/msg"
-git -C "$R" commit -q --allow-empty -F "$TMP/msg"
+gitp "$R" commit -q --allow-empty -F "$TMP/msg"
 run "$R"
 expect_rc0
 expect_has "&lt;-- важно &amp; срочно"
@@ -263,11 +335,11 @@ expect_has "убрать [x] из списка"
 case_ "5. Слияния и шум отбрасываются"
 R="$(mkrepo noise)"
 commit "$R" "полезное изменение"
-git -C "$R" checkout -q -b side
+gitp "$R" checkout -q -b side
 commit "$R" "изменение в ветке"
-git -C "$R" checkout -q main
+gitp "$R" checkout -q main
 commit "$R" "ещё полезное"
-git -C "$R" merge -q --no-ff -m "Merge branch 'side'" side
+gitp "$R" merge -q --no-ff -m "Merge branch 'side'" side
 git -C "$R" log --oneline -1 --format='%p' | grep -q ' ' \
     && ok "коммит слияния действительно создан" || bad "слияния не вышло — случай ничего не проверяет"
 commit "$R" "wip"
@@ -687,7 +759,7 @@ NL="$(printf '%s\n' "$OUT" | grep -c '^• ')"; VIS_L="$(visible "$OUT")"; RAW_L
 case_ "7. Shallow-клон (fetch-depth: 1) — работает, не падает"
 R="$(mkrepo deep)"
 for i in 1 2 3 4 5 6; do commit "$R" "коммит номер $i"; done
-git -C "$R" tag v1.0.0 HEAD~4
+gitp "$R" tag v1.0.0 HEAD~4
 git clone -q --depth 1 "file://$(cd "$R" && pwd)" "$TMP/shallow" 2>/dev/null
 if [[ -d "$TMP/shallow" ]]; then
     [[ "$(git -C "$TMP/shallow" rev-parse --is-shallow-repository)" == true ]] \
@@ -709,7 +781,7 @@ fi
 case_ "8. Detached HEAD"
 R="$(mkrepo detached)"
 for i in 1 2 3 4 5; do commit "$R" "правка номер $i"; done
-git -C "$R" checkout -q --detach HEAD~1
+gitp "$R" checkout -q --detach HEAD~1
 run "$R"
 expect_rc0; expect_has "правка номер 4"; expect_hasnt "правка номер 5"
 
@@ -945,7 +1017,7 @@ case_ "15. --max 0 — весь список целиком, без хвоста
 # «ещё» никакого нет.
 R="$(mkrepo unlimited)"
 commit "$R" "самый первый коммит до тега"
-git -C "$R" tag v1.0.0
+gitp "$R" tag v1.0.0
 for i in {1..25}; do commit "$R" "$(printf 'изменение номер %02d в этом релизе' "$i")"; done
 run "$R" --since v1.0.0 --max 0 --budget 0 --no-header
 expect_rc0; expect_utf8
@@ -967,7 +1039,7 @@ case_ "15b. --budget 0 — блок перерастает прежние 1200 �
 # кто отправляет.
 R="$(mkrepo unlimited-big)"
 commit "$R" "самый первый коммит до тега"
-git -C "$R" tag v1.0.0
+gitp "$R" tag v1.0.0
 CYRMAX="$(rep 'ъ' 117)"
 for i in {1..40}; do commit "$R" "$(printf '%s %02d' "$CYRMAX" "$i")"; done
 run "$R" --since v1.0.0 --max 0 --budget 0 --no-header
@@ -985,11 +1057,15 @@ case_ "15c. Снятый предел — не бесконечность: по�
 # расти без границы ему нельзя. Потолок — 200 пунктов, и, в отличие от
 # умолчания, он обязан честно объявить, что список обрезан.
 R="$(mkrepo unlimited-ceiling)"
-git -C "$R" commit -q --allow-empty -m "самый первый коммит до тега"
-git -C "$R" tag v1.0.0
+commit_empty "$R" "самый первый коммит до тега"
+gitp "$R" tag v1.0.0
 for i in $(seq 1 210); do
-    git -C "$R" commit -q --allow-empty -m "$(printf 'изменение номер %03d' "$i")"
+    commit_empty "$R" "$(printf 'изменение номер %03d' "$i")" || break
 done
+# Двести десять коммитов — самая длинная подготовка набора, и единственная, чья
+# неудача выглядела бы как настоящий провал утверждения ниже: пустой диапазон
+# даёт ровно «пунктов 0». Спрашиваем у git, что получилось, ДО генератора.
+need_commits "$R" v1.0.0..HEAD 210
 run "$R" --since v1.0.0 --max 0 --budget 0 --no-header
 expect_rc0; expect_utf8
 expect_lines 200
@@ -1000,7 +1076,7 @@ case_ "15d. Снятые пределы и ссылки вместе: полны
 # пункт не должен потеряться, и ни один номер — не осиротеть.
 R="$(mkrepo unlimited-links)"
 commit "$R" "самый первый коммит до тега"
-git -C "$R" tag v1.0.0
+gitp "$R" tag v1.0.0
 for i in {1..30}; do commit "$R" "$(printf 'изменение номер %02d в этом релизе' "$i") (#$(( 100 + i )))"; done
 run "$R" --since v1.0.0 --max 0 --budget 0 --no-header --link-base "$BASE"
 expect_rc0; expect_utf8
@@ -1021,7 +1097,7 @@ case_ "15f. --all — то же самое, что --max 0 --budget 0, слов�
 # будет два разных списка одного релиза.
 R="$(mkrepo all-alias)"
 commit "$R" "самый первый коммит до тега"
-git -C "$R" tag v1.0.0
+gitp "$R" tag v1.0.0
 for i in {1..30}; do commit "$R" "$(printf 'изменение номер %02d в этом релизе' "$i") (#$(( 100 + i )))"; done
 run "$R" --since v1.0.0 --max 0 --budget 0 --no-header --link-base "$BASE"
 expect_rc0
