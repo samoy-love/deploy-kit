@@ -455,6 +455,7 @@ executable.
 | `ci/nginx-check.sh` | validates a site config in a real nginx 1.24 container |
 | `ci/changelog-test.sh` | validates `bin/changelog` against throwaway git repositories |
 | `ci/contract-test.sh` | the seam between the generator and the three `version.json` writers |
+| `ci/units-test.sh` | installing systemd units and drop-ins against a fake `/etc` |
 | `nginx/sites` | one file per domain, exactly what is enabled on the server |
 | `nginx/snippets` | shared fragments included from `sites/` |
 | `nginx/conf.d` | what must live at `http` level (log formats) |
@@ -478,7 +479,9 @@ apply there and [`nginx/gzip.md`](nginx/gzip.md) for compression.
 | Two repositories never deploy at once | `flock` on `/var/lock/deploy-kit.lock`, host-wide |
 | A config valid locally but invalid on prod is rejected | `ci/nginx-check.sh` runs the real nginx 1.24 |
 | The scripts on the server match the repository | checksum comparison in `install-server`, upload only from `main` |
-| A systemd unit on the server matches the repository | `install_units`: units travel inside the artifact under `systemd/` |
+| A systemd unit on the server matches the repository | `install_units`: both flat units and `<unit>.d/*.conf` drop-ins travel inside the artifact and are installed on every deploy |
+| A file under `systemd/` that landed nowhere never disappears quietly | `install_units` names everything it did not recognise: a typo in `<unit>.d`, a stray file, a drop-in for a unit that does not exist |
+| Unit installation is checked by running it, not by reading it | `ci/units-test.sh`: the real `install_units` from `lib.sh` against a fake `/etc/systemd/system` |
 | A target that HTTP cannot check is still verified | an executable `verify` in the artifact runs after the switch, rollback on failure |
 | A local deploy never goes quiet unnoticed | `bin/deploy` reads `dk.conf` itself; an unconfigured chat and a Telegram refusal both warn instead of staying silent |
 | The list of changes never breaks a deploy | `bin/changelog` always exits 0, empty output means "nothing to show"; in CI the step carries `continue-on-error` |
@@ -492,8 +495,8 @@ apply there and [`nginx/gzip.md`](nginx/gzip.md) for compression.
 The repository's own CI runs shell syntax checks separately from shellcheck (a
 parsed script with complaints can be fixed, an unparsable one cannot), validates
 every site config in an nginx 1.24 container, lints the workflows with
-actionlint, runs both changelog suites against throwaway repositories and
-asserts that `dk help` still runs. The shell job carries its own
+actionlint, runs both changelog suites against throwaway repositories, drives
+unit installation against a fake `/etc` and asserts that `dk help` still runs. The shell job carries its own
 `timeout-minutes`: an infinite loop in argument parsing has already happened
 once, and it must not hold a runner up to the six-hour default. Each of the two
 test steps carries a limit of its own as well — a hung generator is exactly the
@@ -553,6 +556,25 @@ five releases are kept). Secret names are the same everywhere: `DEPLOY_HOST`,
 `TELEGRAM_CHAT_ID`. `SSH_HOST_KEY` comes from a secret rather than
 `ssh-keyscan`, which trusts the first answer and accepts a substitution
 silently.
+
+**systemd units travel inside the artifact.** Whatever lies in its `systemd/`
+directory is installed into `/etc/systemd/system` by `release.sh` on every
+deploy: flat `*.service`, `*.timer`, `*.socket` as files, and `<unit>.d/*.conf`
+drop-ins into the `<unit>.d` directory, which is created when missing. Only what
+actually changed is copied, and `daemon-reload` runs once and only when
+something changed. A unit arriving for the first time is enabled; timers and
+sockets are started right away. A drop-in is neither enabled nor started: it is
+not a unit but an overlay on an existing one, with no `[Install]` and no state
+of its own. For it to take effect the unit itself must be restarted — the
+target's own unit is restarted by the deploy (`UNIT=`), for anyone else's you
+get a warning.
+
+Putting the units into the artifact is the target's `BUILD_CMD` job; they do not
+get there by themselves. A unit that stays only in git lives its own life: an
+`ExecStart` edit lands in `main`, the deploy is green, and the service keeps
+starting with the old arguments. The reverse holds too: a file deleted from git
+will not vanish from `/etc` by itself — a leftover drop-in is named out loud,
+but never deleted as root.
 
 Current targets:
 
