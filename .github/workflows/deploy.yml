@@ -47,6 +47,12 @@ on:
 
 permissions:
   contents: read
+  # Запись о выкатке против коммита: она появляется на странице самого коммита
+  # и в панели Environments. Переиспользуемые workflow это уже умеют, но право
+  # у них — ПОТОЛОК, а не выдача: вызываемый workflow не может держать больше,
+  # чем дал вызывающий. Здесь вызывающий — этот файл, и без строки ниже API
+  # отвечает 403, а запись молча не появляется.
+  deployments: write
 
 # Выкладка идёт в /opt/deploy-kit и /etc/nginx — два одновременных прогона
 # перезаписывали бы одни файлы. Очередь, а не отмена: отменённая выкладка
@@ -120,6 +126,30 @@ jobs:
           DEPLOY_KEY: /home/runner/.ssh/deploy_key
         run: bash bin/install-server
 
+      - name: Прошлая версия на сервере
+        # Строка «была …» в сообщении. Своего маркера у deploy-kit не было:
+        # у проектов версию хранит имя каталога релиза, а здесь файлы кладутся
+        # поверх, и по ним не понять, что стояло раньше. Читаем ДО выкладки —
+        # после неё это уже нынешняя версия.
+        #
+        # Отсутствие файла — не ошибка, а первая выкладка: строку «была»
+        # тогда просто не печатаем.
+        id: prev
+        if: ${{ !inputs.dry-run }}
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          PREV="$(ssh -i ~/.ssh/deploy_key -o BatchMode=yes "$USER@$HOST" \
+                    'cat /opt/deploy-kit/.version 2>/dev/null' 2>/dev/null | tr -d '\r' | head -1 || true)"
+          # В сообщение уедет как есть, поэтому в маркер пускаем только тот
+          # алфавит, которым сами его пишем: содержимое лежит на хосте и
+          # править его может кто угодно с доступом.
+          case "$PREV" in
+            ''|*[!A-Za-z0-9.-]*) PREV='' ;;
+          esac
+          echo "version=$PREV" >> "$GITHUB_OUTPUT"
+
       - name: Выложить
         if: ${{ !inputs.dry-run }}
         env:
@@ -128,6 +158,21 @@ jobs:
           DEPLOY_KEY: /home/runner/.ssh/deploy_key
         run: bash bin/install-server --apply
 
+      - name: Отметить версию на сервере
+        # Пишем ПОСЛЕ успешной выкладки, иначе маркер соврёт при провале.
+        # Неудача записи выкладку не роняет: файлы уже на месте, а испорченная
+        # строчка «была» — цена несопоставимая с откатом рабочей выкладки.
+        if: ${{ success() && !inputs.dry-run }}
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          printf '%s\n' "$VERSION" \
+            | ssh -i ~/.ssh/deploy_key -o BatchMode=yes "$USER@$HOST" \
+                'sudo tee /opt/deploy-kit/.version >/dev/null && sudo chmod 0644 /opt/deploy-kit/.version' \
+            || echo "::warning::не удалось записать маркер версии — в следующем сообщении не будет строки «была»"
+
       - name: Уведомить в Telegram
         if: always() && !inputs.dry-run
         env:
@@ -135,6 +180,7 @@ jobs:
           CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
           APP: deploy-kit
           VERSION: ${{ steps.ver.outputs.version }}
+          PREV: ${{ steps.prev.outputs.version }}
           STATUS: ${{ job.status }}
           BEFORE: ${{ github.event.before }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -156,20 +202,35 @@ jobs:
           if [ "$STATUS" = "success" ]; then
             CHANGES="$(bash bin/changelog --repo "$GITHUB_WORKSPACE" --since "${BEFORE:-}" --all \
                          --link-base "$LINK_BASE" || true)"
-            # Перечисление обязано совпадать с тем, что публикует
-            # install-server: сообщение о выкладке — единственное, что читатель
-            # о ней узнает, и «сниппеты и conf.d» после добавления catch-all
-            # означало бы «в общий вход nginx мы не ходили», а мы ходили.
-            TEXT=$(printf '🧰 <b>deploy-kit</b> выложен на сервер\n<code>%s</code>\nсерверные скрипты, сниппеты nginx, conf.d и общий catch-all' "$VERSION")
+            # Форма сообщения — та же, что у бота статуса (samoy-status,
+            # bot/format.go, KindRelease). Лента релизов в чате одна на всё
+            # хозяйство, и выкладка deploy-kit, оформленная по-своему, читалась
+            # бы как событие другой природы. Порядок строк тот же: что
+            # обновилось и куда ведёт, версия ссылкой на коммит, прошлая
+            # версия, время сборки, и список изменений последним блоком через
+            # пустую строку.
+            #
+            # Версия — ССЫЛКА НА КОММИТ, а не <code>: связь «коммит → выкатка»
+            # только этой ссылкой в сообщении и выражена. Ровно так делает
+            # versionHTML в боте.
+            TEXT=$(printf '🚀 <b><a href="%s">Deploy Kit · Серверная часть</a></b> обновлён\n<a href="%s/commit/%s">%s</a>' \
+                     "$LINK_BASE" "$LINK_BASE" "$GITHUB_SHA" "$VERSION")
+            [ -n "$PREV" ] && TEXT=$(printf '%s\nбыла <code>%s</code>' "$TEXT" "$PREV")
+            # Время сборки в MSK — как у бота (fmtTime: «02.01 15:04 MSK»).
+            TEXT=$(printf '%s\n<i>собрано %s</i>' "$TEXT" "$(TZ=Europe/Moscow date '+%d.%m %H:%M MSK')")
           else
-            TEXT=$(printf '💥 <b>deploy-kit</b> — выкладка провалена\n<code>%s</code>\n<a href="%s">лог прогона</a>' "$VERSION" "$RUN_URL")
+            TEXT=$(printf '💥 <b><a href="%s">Deploy Kit · Серверная часть</a></b> — выкладка провалена\n<a href="%s/commit/%s">%s</a>\n<a href="%s">лог прогона</a>' \
+                     "$LINK_BASE" "$LINK_BASE" "$GITHUB_SHA" "$VERSION" "$RUN_URL")
           fi
 
           # Список — ПОСЛЕДНИМ блоком. Генератор отдаёт готовый фрагмент HTML
           # со своим заголовком и уже экранированный: повторно не экранируем,
           # в <pre> не заворачиваем, свой заголовок не дописываем.
+          # Через ПУСТУЮ строку, как у бота: список самый длинный, самый
+          # необязательный и единственный, которого может не быть, а всё, ради
+          # чего сообщение читают в первую очередь, остаётся выше и на месте.
           if [ -n "$CHANGES" ]; then
-            TEXT=$(printf '%s\n%s' "$TEXT" "$CHANGES")
+            TEXT=$(printf '%s\n\n%s' "$TEXT" "$CHANGES")
           fi
 
           # --- отправка: одним сообщением или несколькими подряд ------------
