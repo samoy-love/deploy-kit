@@ -614,6 +614,7 @@ Current targets:
 | ChillHub installer | desktop-artifact | [chillhub](https://github.com/tr0llex/chillhub) |
 | Snakes server and client | go-service | [snakes](https://github.com/tr0llex/snakes) |
 | status.samoy.love | static-site + agent | [status.samoy.love](https://github.com/tr0llex/status.samoy.love) |
+| die.samoy.love, dev.die.samoy.love | static-site | [double-or-die](https://github.com/tr0llex/double-or-die) |
 
 The Snakes client ships in **one artifact** with its server: they share a
 binary protocol, and versions drifting apart break packet parsing.

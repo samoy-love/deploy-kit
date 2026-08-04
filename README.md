@@ -586,6 +586,7 @@ NOTIFY=all                          # all (по умолчанию) | fail | nev
 | Установщик ChillHub | desktop-artifact | [chillhub](https://github.com/tr0llex/chillhub) |
 | Сервер и клиент Snakes | go-service | [snakes](https://github.com/tr0llex/snakes) |
 | status.samoy.love | static-site + агент | [status.samoy.love](https://github.com/tr0llex/status.samoy.love) |
+| die.samoy.love, dev.die.samoy.love | static-site | [double-or-die](https://github.com/tr0llex/double-or-die) |
 
 Клиент Snakes едет **одним артефактом** с сервером: у них общий бинарный
 протокол, и разъехавшиеся версии ломают разбор пакетов.
