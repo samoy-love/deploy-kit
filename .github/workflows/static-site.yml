@@ -596,6 +596,24 @@ jobs:
                --root '${{ steps.cfg.outputs.root }}' \
                ${{ steps.cfg.outputs.unit && format('--units ''{0}''', steps.cfg.outputs.unit) || '' }}"
 
+      # ИМЯ НА СЕРВЕРЕ — УНИКАЛЬНОЕ, А НЕ /tmp/site.conf.
+      #
+      # Здесь стоял путь, ОДИН И ТОТ ЖЕ для всех проектов. Пока цели катились
+      # по одной, это работало. Мерж нескольких PR подряд запускает выкатки
+      # параллельно — и они начинают писать в один файл: проект A заливает
+      # свой конфиг, проект B перезаписывает его своим, после чего A просит
+      # применить «/tmp/site.conf» под ИМЕНЕМ СВОЕГО сайта. В
+      # /etc/nginx/sites-available/samoy.love.conf так уехал конфиг
+      # metrics.samoy.love: server_name перестал совпадать, TLS-рукопожатие
+      # для samoy.love падать стало ещё до HTTP, и сайт лёг. Соседи это
+      # заметили и откатили СВОИ исправные релизы — по цепочке покраснели
+      # шесть выкаток из восьми.
+      #
+      # mktemp -d даёт каталог 0700 с непредсказуемым именем: два прогона в
+      # один файл не попадут. Тем же способом это давно делает bin/deploy —
+      # локальный путь выкатки чинили, а переиспользуемый workflow забыли.
+      # Непредсказуемость здесь не только про гонку: /tmp пишет кто угодно, а
+      # читает этот файл nginx-apply.sh под sudo, ставя его в /etc/nginx.
       - name: Обновить конфиг nginx
         if: steps.nginxsrc.outputs.path != '' && steps.cfg.outputs.nginx_dest != ''
         env:
@@ -603,10 +621,17 @@ jobs:
           USER: ${{ secrets.DEPLOY_USER }}
           NGINX_CONF: ${{ steps.nginxsrc.outputs.path }}
         run: |
-          scp -i ~/.ssh/deploy_key "$NGINX_CONF" "$USER@$HOST:/tmp/site.conf"
+          REMOTE_DIR="$(ssh -i ~/.ssh/deploy_key "$USER@$HOST" 'mktemp -d /tmp/dk-XXXXXXXXXX' | tr -d '\r' | tail -1)"
+          case "$REMOTE_DIR" in
+            /*) : ;;
+            *)  echo "::error::не удалось создать временный каталог на сервере"; exit 1 ;;
+          esac
+          trap 'ssh -i ~/.ssh/deploy_key "$USER@$HOST" "rm -rf -- $REMOTE_DIR" || true' EXIT
+
+          scp -i ~/.ssh/deploy_key "$NGINX_CONF" "$USER@$HOST:$REMOTE_DIR/site.conf"
           ssh -i ~/.ssh/deploy_key "$USER@$HOST" \
             "sudo /opt/deploy-kit/nginx-apply.sh --app '${{ steps.cfg.outputs.app }}' \
-               --conf /tmp/site.conf --dest '${{ steps.cfg.outputs.nginx_dest }}' --enable \
+               --conf '$REMOTE_DIR/site.conf' --dest '${{ steps.cfg.outputs.nginx_dest }}' --enable \
                ${{ inputs.dry-run && '--dry-run' || '' }}"
 
       - name: Выкатить
