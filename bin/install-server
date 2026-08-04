@@ -56,7 +56,7 @@ DEPLOY_KEY="${DEPLOY_KEY:-$HOME/.ssh/id_ed25519}"
 SSH=(ssh -i "$DEPLOY_KEY" -o StrictHostKeyChecking=yes "$DEPLOY_USER@$DEPLOY_HOST")
 SCP=(scp -i "$DEPLOY_KEY" -o StrictHostKeyChecking=yes)
 
-FILES=(lib.sh release.sh rollback.sh preflight.sh nginx-apply.sh)
+FILES=(lib.sh release.sh rollback.sh preflight.sh nginx-apply.sh publish-file.sh)
 
 # Общие сниппеты nginx возит эта же команда, и ровно по той же причине, что и
 # скрипты: у них нет проекта-владельца, а значит нет и пайплайна, который бы

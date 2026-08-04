@@ -47,7 +47,8 @@ User_Alias  DEPLOY_USERS = deploy
 Cmnd_Alias  DEPLOY_CMDS = /opt/deploy-kit/preflight.sh,   \
                           /opt/deploy-kit/release.sh,     \
                           /opt/deploy-kit/rollback.sh,    \
-                          /opt/deploy-kit/nginx-apply.sh
+                          /opt/deploy-kit/nginx-apply.sh, \
+                          /opt/deploy-kit/publish-file.sh
 
 DEPLOY_USERS ALL=(root) NOPASSWD: DEPLOY_CMDS
 
