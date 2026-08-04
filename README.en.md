@@ -618,6 +618,28 @@ Current targets:
 The Snakes client ships in **one artifact** with its server: they share a
 binary protocol, and versions drifting apart break packet parsing.
 
+**A change to a reusable workflow cannot be verified by re-running a job.**
+`gh run rerun`, `--failed` included, replays the run against the workflow
+revision that was current when the run first started — even though the call
+goes through `@main` and `main` has been fixed since. The "Re-run jobs" button
+in the UI does the same. You need a **new** run:
+
+```bash
+gh workflow run deploy.yml --ref main                 # targets expose workflow_dispatch
+gh workflow run deploy.yml --ref main -f dry-run=true # no effect on production
+```
+
+A dry run still reaches `nginx-apply.sh` and `release.sh` with `--dry-run`: the
+config delivery path is exercised end to end, production is left alone.
+
+This is not a convenience note. On 2026-08-04 the race over the shared
+`/tmp/site.conf` was fixed, merged into `main` and installed on the server —
+and re-running five failed deploys through `gh run rerun` reproduced it word
+for word: `status.samoy.love`'s config landed in `metrics.samoy.love.conf` and
+monitoring went down a second time. It looked like "the fix does not work",
+while the fix simply **was not running** — the old workflow revision knew
+nothing about it.
+
 ## Part of samoy.love
 
 One domain, one server, one pipeline, one status page, one monitoring stack.
