@@ -639,7 +639,27 @@ jobs:
           HOST: ${{ secrets.DEPLOY_HOST }}
           USER: ${{ secrets.DEPLOY_USER }}
         run: |
-          REMOTE=/tmp/${{ steps.cfg.outputs.app }}-${{ steps.ver.outputs.version }}.tar.gz
+          # Архив кладётся в приватный каталог, а не прямо в /tmp.
+          #
+          # Гонки здесь не было: имя содержит цель и версию, поэтому два
+          # прогона в один файл не попадали. Опасно другое — имя ПРЕДСКАЗУЕМО,
+          # а писать в /tmp может любой локальный пользователь. Этот файл
+          # читает release.sh под sudo и распаковывает от root, так что между
+          # scp и распаковкой есть окно, в которое можно подменить содержимое
+          # или подставить симлинк. Ровно об этом написано в bin/deploy, где
+          # оба временных файла давно уехали в каталог от mktemp -d.
+          #
+          # 0700 и непредсказуемое имя окно закрывают. Убирается по trap, а не
+          # строкой после release.sh: при обрыве scp или ssh каталог иначе
+          # оставался бы на сервере вместе с распакованным релизом внутри.
+          REMOTE_DIR="$(ssh -i ~/.ssh/deploy_key "$USER@$HOST" 'mktemp -d /tmp/dk-XXXXXXXXXX' | tr -d '\r' | tail -1)"
+          case "$REMOTE_DIR" in
+            /*) : ;;
+            *)  echo "::error::не удалось создать временный каталог на сервере"; exit 1 ;;
+          esac
+          trap 'ssh -i ~/.ssh/deploy_key "$USER@$HOST" "rm -rf -- $REMOTE_DIR" || true' EXIT
+
+          REMOTE="$REMOTE_DIR/${{ steps.cfg.outputs.app }}-${{ steps.ver.outputs.version }}.tar.gz"
           scp -i ~/.ssh/deploy_key /tmp/artifact.tar.gz "$USER@$HOST:$REMOTE"
 
           ARGS="--app '${{ steps.cfg.outputs.app }}' --version '${{ steps.ver.outputs.version }}'"
@@ -656,7 +676,6 @@ jobs:
 
           RC=0
           ssh -i ~/.ssh/deploy_key "$USER@$HOST" "sudo /opt/deploy-kit/release.sh $ARGS" || RC=$?
-          ssh -i ~/.ssh/deploy_key "$USER@$HOST" "rm -f '$REMOTE'" || true
           # Код 3 — отказ версионного шлюза: прод не тронут. Отдельная
           # формулировка нужна, чтобы в логе была причина, а не «job failed».
           if [ "$RC" = "3" ]; then
