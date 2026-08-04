@@ -2,9 +2,14 @@ name: desktop-artifact
 
 # Сборка и публикация установщика.
 #
-# Отличие от остальных архетипов: ничего не выкатывается на сервер. Артефакт
-# собирается на windows-раннере, публикуется в GitHub Release с чексуммой и
-# оттуда раздаётся сайтом.
+# Отличие от остальных архетипов: у артефакта нет ни юнита, ни релизного
+# каталога с симлинком current. Собирается он на windows-раннере, а каналов
+# публикации два, и оба необязательные:
+#
+#   * GitHub Release — только на теге: имя релиза берётся из имени ссылки;
+#   * файл на сервере выкатки (вход upload-dest) — установщик и его .sha256
+#     атомарно подменяются в каталоге, который nginx раздаёт как есть.
+#     Именно этот канал делает «мерж в main обновляет кнопку „Скачать“».
 #
 #   jobs:
 #     installer:
@@ -12,6 +17,8 @@ name: desktop-artifact
 #       with:
 #         build: ./scripts/build-installer.ps1 -Configuration Release -AppVersion $env:DEPLOY_VERSION
 #         artifact: scripts/generated_downloads/ChillHub-Setup.exe
+#         upload-dest: /var/www/site-downloads/ChillHub-Setup.exe
+#         verify-url: https://example.com/downloads/ChillHub-Setup.exe.sha256
 #       secrets: inherit
 
 on:
@@ -35,6 +42,21 @@ on:
         required: false
         type: boolean
         default: true
+      version-cmd:
+        description: 'Команда (bash), печатающая версию приложения; используется на прогонах без тега'
+        required: false
+        type: string
+        default: ''
+      upload-dest:
+        description: 'Абсолютный путь установщика на сервере выкатки; задан — установщик публикуется туда'
+        required: false
+        type: string
+        default: ''
+      verify-url:
+        description: 'Публичный URL контрольной суммы (.sha256) для сверки после публикации'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: write
@@ -49,10 +71,31 @@ jobs:
       - name: Версия релиза
         id: ver
         shell: bash
+        env:
+          # Через env, а не подстановкой в тело — см. пояснение у шага
+          # «Проверки» ниже: у workflow токен с правом contents: write.
+          VERSION_CMD: ${{ inputs.version-cmd }}
         run: |
           # Без префикса release-: эта версия уезжает в NSIS как AppVersion,
-          # а он ждёт числовой вид. Установщик и не кладётся релизом на сервер.
+          # а он ждёт числовой вид. Релизным каталогом установщик не кладётся
+          # и версионный шлюз release.sh его не сверяет.
+          #
+          # Порядок источников: тег → version-cmd → заглушка.
+          #
+          # version-cmd нужна прогонам без тега — выкатке по мержу в main.
+          # Там версию объявляет сам репозиторий (например, <Version> в
+          # csproj), и печатает её команда проекта. Сломавшаяся или
+          # замолчавшая команда — это ОТКАЗ, а не откат на заглушку: заглушка
+          # 0.0.0-… уехала бы на прод в launcher.version у каждого, кто
+          # скачает такой установщик.
+          #
+          # Заглушка остаётся для вызовов без version-cmd — проверочных
+          # сборок, которым нужен только сам факт «собирается».
           V="$(git describe --tags --exact-match 2>/dev/null || true)"
+          if [ -z "$V" ] && [ -n "$VERSION_CMD" ]; then
+            V="$(eval "$VERSION_CMD" | tr -d ' \t\r\n')"
+            [ -n "$V" ] || { echo "::error::version-cmd не напечатала версию — публиковать сборку с заглушкой вместо версии нельзя"; exit 1; }
+          fi
           [ -n "$V" ] || V="0.0.0-$(TZ=Europe/Moscow date '+%Y%m%d')-$(git rev-parse --short HEAD)"
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "Версия: $V"
@@ -111,6 +154,76 @@ jobs:
             ${{ inputs.artifact }}.sha256
           retention-days: 30
 
+      # ---------------- публикация на сервер выкатки (вход upload-dest) ----
+      #
+      # Раннер здесь windows, но шаги те же, что в static-site.yml: bash от
+      # Git for Windows несёт свои ssh и scp, и ~/.ssh в нём разворачивается
+      # в профиль раннера — известные хосты и ключ читаются оттуда же, откуда
+      # их читает ssh.
+      - name: Настроить SSH
+        if: inputs.upload-dest != ''
+        shell: bash
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST_KEY: ${{ secrets.SSH_HOST_KEY }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # Ключ хоста из секрета, а не ssh-keyscan: keyscan доверяет первому
+          # ответу и молча принимает подмену.
+          if [ -n "$HOST_KEY" ]; then
+            printf '%s\n' "$HOST_KEY" > ~/.ssh/known_hosts
+          else
+            echo "::warning::SSH_HOST_KEY не задан — ключ хоста принимается доверием к первому ответу"
+            ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          fi
+          chmod 644 ~/.ssh/known_hosts
+
+      # Каталог на сервере — приватный от mktemp, по тем же соображениям, что
+      # в шаге «Выкатить» static-site.yml: файл читает publish-file.sh под
+      # sudo, и между scp и установкой не должно быть окна для подмены.
+      - name: Выложить на сервер
+        if: inputs.upload-dest != ''
+        shell: bash
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          ARTIFACT: ${{ inputs.artifact }}
+          UPLOAD_DEST: ${{ inputs.upload-dest }}
+        run: |
+          REMOTE_DIR="$(ssh -i ~/.ssh/deploy_key "$USER@$HOST" 'mktemp -d /tmp/dk-XXXXXXXXXX' | tr -d '\r' | tail -1)"
+          case "$REMOTE_DIR" in
+            /*) : ;;
+            *)  echo "::error::не удалось создать временный каталог на сервере"; exit 1 ;;
+          esac
+          trap 'ssh -i ~/.ssh/deploy_key "$USER@$HOST" "rm -rf -- $REMOTE_DIR" || true' EXIT
+
+          BASE="$(basename "$ARTIFACT")"
+          scp -i ~/.ssh/deploy_key "$ARTIFACT" "$ARTIFACT.sha256" "$USER@$HOST:$REMOTE_DIR/"
+          ssh -i ~/.ssh/deploy_key "$USER@$HOST" \
+            "sudo /opt/deploy-kit/publish-file.sh --file '$REMOTE_DIR/$BASE' \
+               --sha256 '$REMOTE_DIR/$BASE.sha256' --dest '$UPLOAD_DEST'"
+
+      # «Зелёный деплой со старыми файлами» ловится именно здесь: сумма,
+      # посчитанная на раннере, сверяется с той, что РАЗДАЁТ прод. Это тот же
+      # смысл, что сверка /version.json после выкатки сайта.
+      - name: Сверить с прода
+        if: inputs.upload-dest != '' && inputs.verify-url != ''
+        shell: bash
+        env:
+          URL: ${{ inputs.verify-url }}
+          SHA: ${{ steps.sum.outputs.sha }}
+        run: |
+          GOT="$(curl -fsS --max-time 30 "$URL" | awk '{print tolower($1); exit}')"
+          [ -n "$GOT" ] || { echo "::error::$URL не отдал контрольную сумму — публикация не подтверждена"; exit 1; }
+          if [ "$GOT" != "$SHA" ]; then
+            echo "::error::прод раздаёт другую сборку: собрано $SHA, по адресу $URL лежит $GOT"
+            exit 1
+          fi
+          echo "Проверено: $URL раздаёт свежую сумму $SHA"
+
       - name: Опубликовать в Release
         if: inputs.publish && startsWith(github.ref, 'refs/tags/')
         env:
@@ -134,3 +247,46 @@ jobs:
           gh release create "$TAG" --title "$TAG" --notes "$NOTES" \
             "$ARTIFACT" "$ARTIFACT.sha256" \
             || gh release upload "$TAG" "$ARTIFACT" "$ARTIFACT.sha256" --clobber
+
+      # Публикация на сервер объявляет результат в Telegram, как и остальные
+      # пути выкатки: невыкаченное, о котором не сказали, выглядит как
+      # выкаченное. Шаг короче собрата из static-site.yml, но правила те же:
+      # ответ API разбирается, неудача отправки job не красит, о провале
+      # молчать нельзя.
+      - name: Уведомить в Telegram
+        if: always() && inputs.upload-dest != ''
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          STATUS: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          DOWNLOAD_URL: ${{ inputs.verify-url }}
+        run: |
+          if [ -z "$TOKEN" ] || [ -z "$CHAT" ]; then
+            echo "::warning::TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID не заданы — о публикации установщика никто не узнал"
+            exit 0
+          fi
+          if [ "$STATUS" = "success" ]; then
+            TEXT=$(printf '🚀 <b>установщик</b> опубликован\n<code>%s</code>' "$VERSION")
+            # Ссылка ведёт на сам файл: verify-url — это <файл>.sha256,
+            # хвост срезается. Пустой verify-url — просто без ссылки.
+            if [ -n "$DOWNLOAD_URL" ]; then
+              TEXT=$(printf '%s\n<a href="%s">скачать</a>' "$TEXT" "${DOWNLOAD_URL%.sha256}")
+            fi
+          else
+            TEXT=$(printf '💥 <b>установщик</b> — публикация провалена\n<code>%s</code>\nНа сайте остался прежний файл.\n<a href="%s">разобраться</a>' "$VERSION" "$RUN_URL")
+          fi
+          RESP="$(curl -s -X POST "https://api.telegram.org/bot$TOKEN/sendMessage" \
+            -d chat_id="$CHAT" -d parse_mode=HTML -d disable_web_page_preview=true \
+            --data-urlencode "text=$TEXT" || true)"
+          case "$RESP" in
+            *'"ok":true'*) ;;
+            *) echo "::warning::Telegram не принял уведомление о публикации установщика" ;;
+          esac
+
+      - name: Убрать ключ
+        if: always() && inputs.upload-dest != ''
+        shell: bash
+        run: rm -f ~/.ssh/deploy_key
