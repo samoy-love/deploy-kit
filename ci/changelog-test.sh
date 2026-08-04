@@ -69,10 +69,33 @@ gitp() { # gitp <репозиторий> <аргументы git…>
     (( rc == 0 )) && return 0
     (( PREP_SAID )) && return "$rc"
     PREP_SAID=1
-    # Три строки stderr, а не всё: на негодный аргумент git отвечает экраном
-    # справки, и в логе раннера он вытесняет то, ради чего его читают.
-    bad "подготовка не удалась: git $* — код $rc"$'\n'"    $(head -3 "$PREP_ERR")"
+    bad "подготовка не удалась: git $* — код $rc"$'\n'"$(prep_why "$d")"
     return "$rc"
+}
+
+# Почему git не смог. Шесть строк stderr, а не всё: на негодный аргумент git
+# отвечает экраном справки, и в логе раннера он вытесняет то, ради чего его
+# читают.
+#
+# Отдельная ветка — на случай, когда git не сказал НИЧЕГО. Код 128 без единого
+# слова в stderr означает не «git отказался», а «git не дожил», и разбирать
+# такое по одной цифре нечем: раннер, где это случилось, к тому времени уже
+# удалён вместе со своим /tmp. Поэтому обстановку снимаем сразу — место на
+# диске, чужой lock в репозитории, версия git. Именно эти три вопроса задают
+# первыми, и ответить на них можно только здесь и сейчас.
+prep_why() {
+    local d="$1" locks
+    if [[ -s "$PREP_ERR" ]]; then
+        sed -n '1,6p' "$PREP_ERR" | sed 's/^/    git: /'
+        return
+    fi
+    locks="$(find "$d/.git" -name '*.lock' 2>/dev/null | tr '\n' ' ')"
+    printf '    git промолчал: код есть, объяснения нет. Обстановка на месте провала:\n'
+    printf '    репозиторий: %s\n' "$d"
+    printf '    свободно под %s: %s\n' "$TMP" \
+        "$(df -Pk "$TMP" 2>/dev/null | awk 'NR == 2 { print $4 " КиБ (занято " $5 ")" }')"
+    printf '    файлов .lock в репозитории: %s\n' "${locks:-нет}"
+    printf '    %s\n' "$(git --version 2>&1 | head -1)"
 }
 
 # need_commits <репозиторий> <диапазон> <сколько> — проверка ПОДГОТОВКИ, а не
@@ -117,10 +140,49 @@ commit() { # commit <repo> <subject>
     gitp "$d" commit -q -F - <<< "$s"
 }
 
-# Пустой коммит. Отдельно от commit(), потому что случай 15c делает их две
+# Пустой коммит. Отдельно от commit(), потому что случаю 15c их нужны две
 # сотни: двести файлов в дереве были бы платой ни за что.
 commit_empty() { # commit_empty <репозиторий> <тема>
     gitp "$1" commit -q --allow-empty -m "$2"
+}
+
+# Пачка пустых коммитов ОДНИМ вызовом git.
+#
+# Половина случаев ниже строит историю циклом на два-четыре десятка коммитов, а
+# случай 15c — на две сотни. Отдельным `git commit` на каждый это четыре с
+# половиной сотни процессов, каждый со своим индексом, своим index.lock и своим
+# шансом не завестись. Шанс сыграл: на раннере GitHub подготовка 15c упала с
+# кодом 128 на 178-м коммите, три зависящих от неё проверки посыпались следом, а
+# повторный прогон без единой правки был зелёным. Флоук в тесте генератора
+# списка изменений стоит дорого: он заставляет перезапускать CI на верных
+# правках и приучает читать красный прогон как «наверное, опять оно».
+#
+# fast-import строит всю цепочку за один вызов, не открывая ни индекс, ни
+# рабочее дерево, — то есть и не зависит от их состояния. Двухсот попыток
+# споткнуться больше нет: попытка одна, и её код возврата проверяется как
+# всякий другой.
+#
+# Темы передаются аргументами, а не через конвейер: bad() из подоболочки не
+# вернул бы счётчик провалов, и неудача подготовки снова стала бы невидимой.
+# Собирать их вызывающему стоит через `printf -v` — это встроенная команда, и
+# двести тем обходятся без единого форка.
+commits_empty() { # commits_empty <репозиторий> <тема…>
+    local d="$1" s t=1735689600 first=1 stream="$TMP/fast-import"; shift
+    (( $# )) || return 0
+    # Ветка уже существует у всех вызывающих (первый коммит и тег ставятся до),
+    # но спросить дешевле, чем получить «unknown ref» посреди импорта.
+    git -C "$d" rev-parse -q --verify refs/heads/main >/dev/null 2>&1 || first=0
+    {
+        for s in "$@"; do
+            # Время растёт: порядок в `git log` не должен зависеть от того, как
+            # git разложит коммиты с одной и той же секундой.
+            t=$(( t + 1 ))
+            printf 'commit refs/heads/main\ncommitter dev <dev@example.invalid> %d +0000\ndata <<DKEOM\n%s\nDKEOM\n' \
+                "$t" "$s"
+            (( first )) && { printf 'from refs/heads/main^0\n'; first=0; }
+        done
+    } > "$stream"
+    gitp "$d" fast-import --quiet --date-format=raw < "$stream"
 }
 
 # run <repo> [args…] → stdout в $OUT, stderr в $ERR, код в $RC
@@ -251,7 +313,8 @@ expect_hasnt "…и ещё"
 
 case_ "1a. Больше коммитов, чем depth — читается ровно depth, без вранья в хвосте"
 R="$(mkrepo notags-many)"
-for i in {1..30}; do commit "$R" "изменение номер $i"; done
+SUBJ=(); for (( i = 1; i <= 30; i++ )); do printf -v s 'изменение номер %d' "$i"; SUBJ+=("$s"); done
+commits_empty "$R" "${SUBJ[@]}"
 run "$R" --max 3 --depth 8
 expect_rc0; expect_lines 3; expect_has "…и ещё 5 коммитов"
 expect_hasnt "…и ещё 27"
@@ -426,7 +489,8 @@ expect_has "настоящее изменение"
 case_ "6. Длинная тема режется, UTF-8 не рвётся, бюджет соблюдён"
 R="$(mkrepo long)"
 LONG="переписать обработку конфигурации так чтобы она наконец перестала зависеть от порядка ключей и локали машины разработчика"
-for i in 1 2 3 4 5 6 7 8 9 10; do commit "$R" "$LONG $i"; done
+SUBJ=(); for (( i = 1; i <= 10; i++ )); do printf -v s '%s %d' "$LONG" "$i"; SUBJ+=("$s"); done
+commits_empty "$R" "${SUBJ[@]}"
 run "$R" --max 10 --width 60 --budget 400 --depth 20
 expect_rc0; expect_utf8; expect_chars_le 400
 expect_has "…"
@@ -733,7 +797,10 @@ case_ "6p. Разметка ссылки не ест и бюджет блока"
 # зависеть НИЧЕГО. Поэтому один и тот же список собирается дважды: с короткой
 # базой и с базой в полтораста символов.
 R="$(mkrepo link-budget)"
-for i in {1..12}; do commit "$R" "$(printf 'достаточно длинная тема коммита номер %02d, как их и пишут' "$i") (#$i)"; done
+SUBJ=(); for (( i = 1; i <= 12; i++ )); do
+    printf -v s 'достаточно длинная тема коммита номер %02d, как их и пишут (#%d)' "$i" "$i"; SUBJ+=("$s")
+done
+commits_empty "$R" "${SUBJ[@]}"
 LONGBASE="https://example.invalid/$(rep 'y' 120)"
 run "$R" --depth 20 --max 20 --budget 400 --no-header --link-base "$BASE"
 NS="$(printf '%s\n' "$OUT" | grep -c '^• ')"; VIS_S="$(visible "$OUT")"; RAW_S="$(chars "$OUT")"
@@ -959,9 +1026,10 @@ done
 
 case_ "14. Всё сообщение целиком укладывается в лимит Telegram"
 R="$(mkrepo telegram)"
-for i in {1..40}; do
-    commit "$R" "довольно длинная тема коммита номер $i, какие обычно и пишут в этом хозяйстве"
+SUBJ=(); for (( i = 1; i <= 40; i++ )); do
+    printf -v s 'довольно длинная тема коммита номер %d, какие обычно и пишут в этом хозяйстве' "$i"; SUBJ+=("$s")
 done
+commits_empty "$R" "${SUBJ[@]}"
 run "$R" --depth 40 --max 8
 PREFIX="🚀 <b>samoylove</b> выкачен
 <code>release-20260803-120000-1a2b3c4</code>
@@ -983,7 +1051,8 @@ R="$(mkrepo telegram-max)"
 CYRMAX="$(rep 'ъ' 117)"
 # Номер двузначный у всех, иначе длина тем разъедется и «предельная» перестанет
 # быть предельной. 117 + пробел + две цифры = ровно 120 символов.
-for i in {1..12}; do commit "$R" "$(printf '%s %02d' "$CYRMAX" "$i")"; done
+SUBJ=(); for (( i = 1; i <= 12; i++ )); do printf -v s '%s %02d' "$CYRMAX" "$i"; SUBJ+=("$s"); done
+commits_empty "$R" "${SUBJ[@]}"
 run "$R" --depth 20 --max 8
 expect_rc0; expect_utf8; expect_lines 8
 # Коммитов 12, показано 8: место под хвост зарезервировано заранее, и хвост
@@ -1018,7 +1087,8 @@ case_ "15. --max 0 — весь список целиком, без хвоста
 R="$(mkrepo unlimited)"
 commit "$R" "самый первый коммит до тега"
 gitp "$R" tag v1.0.0
-for i in {1..25}; do commit "$R" "$(printf 'изменение номер %02d в этом релизе' "$i")"; done
+SUBJ=(); for (( i = 1; i <= 25; i++ )); do printf -v s 'изменение номер %02d в этом релизе' "$i"; SUBJ+=("$s"); done
+commits_empty "$R" "${SUBJ[@]}"
 run "$R" --since v1.0.0 --max 0 --budget 0 --no-header
 expect_rc0; expect_utf8
 expect_lines 25
@@ -1041,7 +1111,8 @@ R="$(mkrepo unlimited-big)"
 commit "$R" "самый первый коммит до тега"
 gitp "$R" tag v1.0.0
 CYRMAX="$(rep 'ъ' 117)"
-for i in {1..40}; do commit "$R" "$(printf '%s %02d' "$CYRMAX" "$i")"; done
+SUBJ=(); for (( i = 1; i <= 40; i++ )); do printf -v s '%s %02d' "$CYRMAX" "$i"; SUBJ+=("$s"); done
+commits_empty "$R" "${SUBJ[@]}"
 run "$R" --since v1.0.0 --max 0 --budget 0 --no-header
 expect_rc0; expect_utf8
 expect_lines 40
@@ -1059,9 +1130,8 @@ case_ "15c. Снятый предел — не бесконечность: по�
 R="$(mkrepo unlimited-ceiling)"
 commit_empty "$R" "самый первый коммит до тега"
 gitp "$R" tag v1.0.0
-for i in $(seq 1 210); do
-    commit_empty "$R" "$(printf 'изменение номер %03d' "$i")" || break
-done
+SUBJ=(); for (( i = 1; i <= 210; i++ )); do printf -v s 'изменение номер %03d' "$i"; SUBJ+=("$s"); done
+commits_empty "$R" "${SUBJ[@]}"
 # Двести десять коммитов — самая длинная подготовка набора, и единственная, чья
 # неудача выглядела бы как настоящий провал утверждения ниже: пустой диапазон
 # даёт ровно «пунктов 0». Спрашиваем у git, что получилось, ДО генератора.
@@ -1077,7 +1147,10 @@ case_ "15d. Снятые пределы и ссылки вместе: полны
 R="$(mkrepo unlimited-links)"
 commit "$R" "самый первый коммит до тега"
 gitp "$R" tag v1.0.0
-for i in {1..30}; do commit "$R" "$(printf 'изменение номер %02d в этом релизе' "$i") (#$(( 100 + i )))"; done
+SUBJ=(); for (( i = 1; i <= 30; i++ )); do
+    printf -v s 'изменение номер %02d в этом релизе (#%d)' "$i" $(( 100 + i )); SUBJ+=("$s")
+done
+commits_empty "$R" "${SUBJ[@]}"
 run "$R" --since v1.0.0 --max 0 --budget 0 --no-header --link-base "$BASE"
 expect_rc0; expect_utf8
 expect_lines 30
@@ -1098,7 +1171,10 @@ case_ "15f. --all — то же самое, что --max 0 --budget 0, слов�
 R="$(mkrepo all-alias)"
 commit "$R" "самый первый коммит до тега"
 gitp "$R" tag v1.0.0
-for i in {1..30}; do commit "$R" "$(printf 'изменение номер %02d в этом релизе' "$i") (#$(( 100 + i )))"; done
+SUBJ=(); for (( i = 1; i <= 30; i++ )); do
+    printf -v s 'изменение номер %02d в этом релизе (#%d)' "$i" $(( 100 + i )); SUBJ+=("$s")
+done
+commits_empty "$R" "${SUBJ[@]}"
 run "$R" --since v1.0.0 --max 0 --budget 0 --no-header --link-base "$BASE"
 expect_rc0
 ALL_A="$OUT"
