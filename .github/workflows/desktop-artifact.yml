@@ -269,7 +269,13 @@ jobs:
           HOST_KEY: ${{ secrets.SSH_HOST_KEY }}
           HOST: ${{ secrets.DEPLOY_HOST }}
         run: |
-          install -m 700 -d ~/.ssh
+          # НЕ `install -m 700 -d`, как в static-site.yml: раннер здесь
+          # windows, каталог ~/.ssh уже существует, а сменить права на нём
+          # Git Bash не может — ACL профиля не его: «cannot change
+          # permissions … Permission denied», и публикация падала ещё до
+          # первого байта. ssh от Git for Windows строгие права требует
+          # только от самого ключа, каталогу достаточно существовать.
+          mkdir -p ~/.ssh
           printf '%s\n' "$KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           # Ключ хоста из секрета, а не ssh-keyscan: keyscan доверяет первому
