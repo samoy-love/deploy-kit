@@ -68,13 +68,26 @@ command -v curl >/dev/null 2>&1 || die "нет curl"
 JAR="$(mktemp -t dk-admin-XXXXXX)"
 trap 'rm -f "$JAR"' EXIT
 
-# Форма, а не JSON: логин принимает обе, а с формой пароль с кавычками и
-# слэшами не требует экранирования вовсе (--data-urlencode кодирует сам).
+# Учётные данные уезжают JSON-телом ЧЕРЕЗ STDIN, а не аргументами curl и не
+# файлом. Причина та же, что у `text@-` в tg_send (см. bin/deploy): под
+# Windows curl — нативный бинарь, его argv перекодируется в системную кодовую
+# страницу, и любой не-ASCII символ в пароле доехал бы искажённым — как
+# «неверный пароль», по которому не понять, что сломалась кодировка, а не
+# учётка. Файл не годится там же: POSIX-путь от mktemp нативный curl не
+# понимает вовсе. stdin идёт байтами мимо обеих мин.
+#
+# Экранируются ровно два символа, которые JSON-строка не терпит сырыми из
+# этого набора: \ и ". Управляющих символов в пароле не бывает не по вере в
+# лучшее, а потому, что такой пароль нельзя было бы и задать этим же путём.
+json_str() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+
 # -f превращает 401 в ненулевой код; тело ответа при этом не печатается —
 # и не должно: в нём нечего читать, а причина и так одна из двух.
-if ! curl -fsS --max-time 30 -c "$JAR" -o /dev/null \
-        --data-urlencode "username=$ADMIN_USER" \
-        --data-urlencode "password=$ADMIN_PASSWORD" \
+if ! printf '{"username":"%s","password":"%s"}' \
+        "$(json_str "$ADMIN_USER")" "$(json_str "$ADMIN_PASSWORD")" \
+    | curl -fsS --max-time 30 -c "$JAR" -o /dev/null \
+        -H 'Content-Type: application/json' \
+        --data-binary @- \
         "$URL/auth/login"; then
     die "логин в админку не прошёл ($URL/auth/login): неверные ADMIN_USER/ADMIN_PASSWORD либо админка недоступна"
 fi

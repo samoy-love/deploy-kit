@@ -709,9 +709,26 @@ TG_WHY=""
 tg_send() { # tg_send <токен> <чат> <текст> → 0 отправлено, 1 нет (причина в TG_WHY)
     local token="$1" chat="$2" text="$3" resp=""
     TG_WHY=""
-    resp="$(curl -s -m 15 -X POST "https://api.telegram.org/bot$token/sendMessage" \
-        -d chat_id="$chat" -d parse_mode=HTML -d disable_web_page_preview=true \
-        --data-urlencode "text=$text" 2>/dev/null || true)"
+    # Текст уезжает ЧЕРЕЗ STDIN (`text@-`), а не аргументом `text=…`, и это не
+    # вкусовщина. На Windows выкатка идёт из Git Bash, а curl там НАТИВНЫЙ:
+    # аргументы ему msys перекодирует в системную кодовую страницу. Проверено
+    # локально — «🚀 привет» в аргументе уезжает как `%3F%3F+%EF%F0%E8%E2%E5%F2`
+    # (эмодзи двумя «?» по суррогатной паре, кириллица в CP1251), и в чат
+    # приходит строка сплошных «?». Через stdin те же символы уходят
+    # `%F0%9F%9A%80+%D0%BF…` — байт в байт UTF-8. На Linux и macOS не меняется
+    # ничего.
+    #
+    # Файлом (`text@файл`) сделать нельзя: путь от mktemp остаётся POSIX-ным, а
+    # нативный curl его не понимает — curl отвечает «error encountered when
+    # reading a file» и не отправляет НИЧЕГО. Это проверено там же.
+    #
+    # Тот же дефект жил в notify установщика: он исполняется на
+    # windows-раннере, и текст там теперь тоже уезжает через stdin —
+    # см. шаг «Уведомить в Telegram» в desktop-artifact.yml.
+    resp="$(printf '%s' "$text" \
+        | curl -s -m 15 -X POST "https://api.telegram.org/bot$token/sendMessage" \
+            -d chat_id="$chat" -d parse_mode=HTML -d disable_web_page_preview=true \
+            --data-urlencode "text@-" 2>/dev/null || true)"
     [[ "$resp" =~ \"ok\"[[:space:]]*:[[:space:]]*true ]] && return 0
     # В причину попадает только описание ошибки от API: URL с токеном не
     # печатается никогда и никуда.

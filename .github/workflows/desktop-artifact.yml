@@ -25,10 +25,11 @@ name: desktop-artifact
 #         config: .deploy-kit/installer.env
 #       secrets: inherit
 #
-# Ключи описания: APP, BUILD_CMD (bash-строка; PowerShell зовётся в ней явно),
-# ARTIFACT_FILE, VERSION_CMD, PUBLISH_DEST, VERIFY_URL, SELFUPDATE_URL,
-# SELFUPDATE_ZIP, NOTIFY. Описание цели сильнее одноимённых входов — ровно как
-# NGINX_CONF в static-site.yml: оно ближе к выкатке и читается обоими путями.
+# Ключи описания: APP, TITLE, BUILD_CMD (bash-строка; PowerShell зовётся в ней
+# явно), ARTIFACT_FILE, VERSION_CMD, PUBLISH_DEST, VERIFY_URL, HEALTH,
+# SELFUPDATE_URL, SELFUPDATE_ZIP, NOTIFY. Описание цели сильнее одноимённых
+# входов — ровно как NGINX_CONF в static-site.yml: оно ближе к выкатке и
+# читается обоими путями.
 #
 # Отдельные входы build/artifact/… остаются для проверочных сборок, которым
 # описание цели не нужно («собирается ли установщик вообще»).
@@ -84,6 +85,18 @@ jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 45
+    # Всё, что нужно job'у уведомления. Он идёт на ubuntu (см. его шапку) и
+    # описания цели уже не видит: файл лежит в репозитории проекта, а читает
+    # его шаг «Прочитать описание цели» здесь.
+    outputs:
+      app: ${{ steps.cfg.outputs.app }}
+      title: ${{ steps.cfg.outputs.title }}
+      home: ${{ steps.cfg.outputs.home }}
+      version: ${{ steps.ver.outputs.version }}
+      notify: ${{ steps.cfg.outputs.notify }}
+      upload_dest: ${{ steps.cfg.outputs.upload_dest }}
+      verify_url: ${{ steps.cfg.outputs.verify_url }}
+      selfupdate_url: ${{ steps.cfg.outputs.selfupdate_url }}
     steps:
       - uses: actions/checkout@v7
 
@@ -104,8 +117,9 @@ jobs:
           IN_UPLOAD_DEST: ${{ inputs.upload-dest }}
           IN_VERIFY_URL: ${{ inputs.verify-url }}
         run: |
-          APP=""; BUILD_CMD=""; ARTIFACT_FILE=""; VERSION_CMD=""
-          PUBLISH_DEST=""; VERIFY_URL=""; SELFUPDATE_URL=""; SELFUPDATE_ZIP=""; NOTIFY=""
+          APP=""; TITLE=""; BUILD_CMD=""; ARTIFACT_FILE=""; VERSION_CMD=""
+          PUBLISH_DEST=""; VERIFY_URL=""; HEALTH=""
+          SELFUPDATE_URL=""; SELFUPDATE_ZIP=""; NOTIFY=""
           if [ -n "$CONFIG" ]; then
             # Путь обязан быть относительным и не выходить из репозитория —
             # ровно те же требования, что у config в static-site.yml.
@@ -143,6 +157,15 @@ jobs:
           BUILD_PWSH=""; [ -z "$CONFIG" ] && BUILD_PWSH="$IN_BUILD"
           {
             echo "app=${APP:-установщик}"
+            # Имя для чата. APP — техническое имя цели (chillhub-installer), и
+            # в ленте релизов, где у соседей стоит «Лаунчер · Сайт», оно
+            # читается как строка из лога, а не как событие хозяйства. TITLE
+            # необязателен: без него в сообщение уедет APP, как и уезжал.
+            echo "title=${TITLE:-${APP:-установщик}}"
+            # Куда ведёт название в сообщении: страница, с которой файл
+            # скачивают. Тот же ключ, что у остальных архетипов, — там он
+            # адрес пробы, здесь ссылка «куда смотреть глазами».
+            echo "home=$HEALTH"
             echo "build_bash=${CONFIG:+$BUILD_CMD}"
             echo "build_pwsh=$BUILD_PWSH"
             echo "artifact=$ARTIFACT_FILE"
@@ -386,35 +409,113 @@ jobs:
           SHA: ${{ steps.sum.outputs.sha }}
         shell: bash
         run: |
-          NOTES="Установщик ChillHub $VERSION
+          # Текст уезжает ФАЙЛОМ, а не аргументом --notes, и это не стиль.
+          # Раннер здесь windows, bash — от Git for Windows, и аргументы
+          # нативному gh.exe он перекодирует в системную кодовую страницу, где
+          # кириллице соответствия нет: заметки релиза приехали бы сплошными
+          # «?». Через файл наружу уходит имя, а байты текста пишет сам bash —
+          # в UTF-8, как написано. Та же причина увела уведомление в чат
+          # отдельным job'ом (см. job notify).
+          cat > /tmp/release-notes.md <<EOF
+          Установщик ChillHub $VERSION
 
           SHA-256: \`$SHA\`
 
           Windows покажет предупреждение SmartScreen: установщик не подписан.
-          «Подробнее» → «Выполнить в любом случае»."
+          «Подробнее» → «Выполнить в любом случае».
+          EOF
 
-          gh release create "$TAG" --title "$TAG" --notes "$NOTES" \
+          gh release create "$TAG" --title "$TAG" --notes-file /tmp/release-notes.md \
             "$ARTIFACT" "$ARTIFACT.sha256" \
             || gh release upload "$TAG" "$ARTIFACT" "$ARTIFACT.sha256" --clobber
 
-      # Публикация на сервер объявляет результат в Telegram, как и остальные
-      # пути выкатки: невыкаченное, о котором не сказали, выглядит как
-      # выкаченное. Шаг короче собрата из static-site.yml, но правила те же:
-      # ответ API разбирается, неудача отправки job не красит, о провале
-      # молчать нельзя.
-      - name: Уведомить в Telegram
+      - name: Убрать ключ
         if: always() && steps.cfg.outputs.upload_dest != ''
         shell: bash
+        run: rm -f ~/.ssh/deploy_key
+
+  # Публикация на сервер объявляет результат в Telegram, как и остальные пути
+  # выкатки: невыкаченное, о котором не сказали, выглядит как выкаченное.
+  #
+  # ОТДЕЛЬНЫМ JOB'ОМ И НА UBUNTU — не ради красоты структуры.
+  #
+  # Шагом сборки это уезжало в чат строкой «?? chillhub-installer ???????????».
+  # Раннер сборки windows, bash там от Git for Windows, и аргументы НАТИВНОМУ
+  # curl.exe он перекодирует в системную кодовую страницу (CP1252), где ни
+  # кириллице, ни эмодзи соответствия нет: каждый символ становится «?», а
+  # эмодзи — двумя, по суррогатной паре. В логе прогона при этом всё читается:
+  # echo не выходит за пределы bash, argv не проходит, — поэтому дефект был
+  # виден только в чате и только получателю.
+  #
+  # Вылечить это на месте нечем: перекодировка живёт между bash и любым
+  # нативным exe, а curl на раннере нативный. Здесь же, на ubuntu, сообщение
+  # собирается и уходит ровно так же, как у остальных архетипов, — тем же
+  # кодом, теми же строками.
+  #
+  # Форма сообщения — та же, что у бота статуса (samoy-status, bot/format.go,
+  # KindRelease) и у deploy.yml: лента релизов в чате одна на всё хозяйство, и
+  # установщик, оформленный по-своему, читался бы как событие другой природы.
+  # Строки «была …» здесь нет: цель-файл не хранит на сервере версию — она не
+  # едет релизным каталогом, и предыдущую взять неоткуда.
+  notify:
+    needs: build
+    if: always() && needs.build.outputs.upload_dest != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Глубина и теги — ради списка изменений: по умолчанию checkout привозит
+      # один коммит, и генератор честно покажет ровно один пункт. Причина
+      # ровно та же, что в static-site.yml, где это расписано подробно.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 50
+          fetch-tags: true
+
+      # Список изменений — украшение поверх публикации: ни одна его неудача не
+      # имеет права ни уронить шаг, ни отменить сообщение. Отсюда пустой файл
+      # заранее, warning вместо error и continue-on-error сверху.
+      - name: Собрать список изменений
+        continue-on-error: true
+        if: needs.build.result == 'success'
+        env:
+          CHANGELOG_FILE: /tmp/changelog.html
+          # Есть только у push; на остальных событиях пусто — генератор сам
+          # откатится на тег или на последние коммиты. Взять точку отсчёта с
+          # прода, как это делает static-site.yml, здесь нечем: version.json
+          # цель-файл не раздаёт.
+          BEFORE: ${{ github.event_name == 'push' && github.event.before || '' }}
+          LINK_BASE: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          : > "$CHANGELOG_FILE"
+          # Качается с main, как и bin/selfupdate-upload выше: генератор один
+          # на все пути выкатки, копий в проектах нет.
+          if ! curl -fsSL https://raw.githubusercontent.com/tr0llex/deploy-kit/main/bin/changelog -o /tmp/changelog; then
+            echo "::warning::bin/changelog не скачался — сообщение уедет без списка изменений"
+            exit 0
+          fi
+          # timeout — по той же причине, что в static-site.yml: ревизию main в
+          # момент прогона здесь никто не закрепляет, а украшение поверх
+          # выкатки не может стать её потолком по времени.
+          if ! timeout 60 bash /tmp/changelog --repo "$GITHUB_WORKSPACE" --since "${BEFORE:-}" \
+                 --link-base "$LINK_BASE" --all > "$CHANGELOG_FILE"; then
+            echo "::warning::генератор списка изменений не отработал — сообщение уедет без него"
+            : > "$CHANGELOG_FILE"
+          fi
+
+      - name: Уведомить в Telegram
         env:
           TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
-          APP: ${{ steps.cfg.outputs.app }}
-          VERSION: ${{ steps.ver.outputs.version }}
-          NOTIFY: ${{ steps.cfg.outputs.notify }}
-          STATUS: ${{ job.status }}
+          TITLE: ${{ needs.build.outputs.title }}
+          HOME_URL: ${{ needs.build.outputs.home }}
+          VERSION: ${{ needs.build.outputs.version }}
+          NOTIFY: ${{ needs.build.outputs.notify }}
+          STATUS: ${{ needs.build.result }}
+          CHANGELOG_FILE: /tmp/changelog.html
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          DOWNLOAD_URL: ${{ steps.cfg.outputs.verify_url }}
-          SELFUPDATE_URL: ${{ steps.cfg.outputs.selfupdate_url }}
+          LINK_BASE: ${{ github.server_url }}/${{ github.repository }}
+          DOWNLOAD_URL: ${{ needs.build.outputs.verify_url }}
+          SELFUPDATE_URL: ${{ needs.build.outputs.selfupdate_url }}
         run: |
           # Правила NOTIFY те же, что у остальных целей: об успехе можно
           # молчать, о провале — нельзя.
@@ -426,10 +527,25 @@ jobs:
             echo "::warning::TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID не заданы — о публикации установщика никто не узнал"
             exit 0
           fi
+
+          # Название — ССЫЛКОЙ на страницу, с которой файл скачивают, как имя
+          # сервиса у соседей ведёт на сам сервис. Нет HEALTH в описании цели —
+          # остаётся голое название: пустой href увёл бы читателя в никуда.
+          NAME="$TITLE"
+          if [ -n "$HOME_URL" ]; then
+            NAME=$(printf '<a href="%s">%s</a>' "$HOME_URL" "$TITLE")
+          fi
+
           if [ "$STATUS" = "success" ]; then
-            TEXT=$(printf '🚀 <b>%s</b> опубликован\n<code>%s</code>' "$APP" "$VERSION")
-            # Ссылка ведёт на сам файл: verify-url — это <файл>.sha256,
-            # хвост срезается. Пустой verify-url — просто без ссылки.
+            # Версия — ССЫЛКА НА КОММИТ, а не <code>: связь «коммит →
+            # публикация» только этой ссылкой в сообщении и выражена. Ровно так
+            # делает versionHTML в боте и notify в deploy.yml.
+            TEXT=$(printf '🚀 <b>%s</b> опубликован\n<a href="%s/commit/%s">%s</a>' \
+                     "$NAME" "$LINK_BASE" "$GITHUB_SHA" "$VERSION")
+            # Время сборки в MSK — как у бота (fmtTime: «02.01 15:04 MSK»).
+            TEXT=$(printf '%s\n<i>собрано %s</i>' "$TEXT" "$(TZ=Europe/Moscow date '+%d.%m %H:%M MSK')")
+            # Ссылка ведёт на сам файл: verify-url — это <файл>.sha256, хвост
+            # срезается. Пустой verify-url — просто без ссылки.
             if [ -n "$DOWNLOAD_URL" ]; then
               TEXT=$(printf '%s\n<a href="%s">скачать</a>' "$TEXT" "${DOWNLOAD_URL%.sha256}")
             fi
@@ -437,23 +553,120 @@ jobs:
             # обязано напомнить про ручной шаг: иначе «опубликован» читается
             # как «пользователи обновятся», а они не обновятся никогда.
             if [ -n "$SELFUPDATE_URL" ]; then
-              TEXT=$(printf '%s\nсборка самообновления в админке; активной её делает переключение latest — руками' "$TEXT")
+              TEXT=$(printf '%s\n<i>сборка самообновления в админке; активной её делает переключение latest — руками</i>' "$TEXT")
+            fi
+            # Список — ПОСЛЕДНИМ блоком и через пустую строку, как у бота.
+            # Генератор отдаёт готовый фрагмент HTML со своим заголовком и уже
+            # экранированный: повторно не экранируем и свой заголовок не
+            # дописываем. Тема коммита — враждебный ввод (её пишет кто угодно с
+            # правом на пуш), и дальше она идёт только АРГУМЕНТОМ printf, не
+            # форматом.
+            CHANGES=""
+            if [ -s "$CHANGELOG_FILE" ]; then
+              CHANGES="$(cat "$CHANGELOG_FILE")"
+            fi
+            if [ -n "$CHANGES" ]; then
+              TEXT=$(printf '%s\n\n%s' "$TEXT" "$CHANGES")
             fi
           else
-            # Про «на сайте остался прежний файл» здесь больше не говорится:
-            # с каналом самообновления провал случается и ПОСЛЕ подмены файла,
-            # и утверждение стало бы враньём ровно в половине случаев.
-            TEXT=$(printf '💥 <b>%s</b> — публикация провалена\n<code>%s</code>\nЧто успело уехать — видно в прогоне.\n<a href="%s">разобраться</a>' "$APP" "$VERSION" "$RUN_URL")
+            # Про «на сайте остался прежний файл» здесь не говорится: с каналом
+            # самообновления провал случается и ПОСЛЕ подмены файла, и
+            # утверждение стало бы враньём ровно в половине случаев.
+            TEXT=$(printf '💥 <b>%s</b> — публикация провалена\n<a href="%s/commit/%s">%s</a>\nЧто успело уехать — видно в прогоне.\n<a href="%s">лог прогона</a>' \
+                     "$NAME" "$LINK_BASE" "$GITHUB_SHA" "$VERSION" "$RUN_URL")
           fi
-          RESP="$(curl -s -X POST "https://api.telegram.org/bot$TOKEN/sendMessage" \
-            -d chat_id="$CHAT" -d parse_mode=HTML -d disable_web_page_preview=true \
-            --data-urlencode "text=$TEXT" || true)"
-          case "$RESP" in
-            *'"ok":true'*) ;;
-            *) echo "::warning::Telegram не принял уведомление о публикации установщика" ;;
-          esac
 
-      - name: Убрать ключ
-        if: always() && steps.cfg.outputs.upload_dest != ''
-        shell: bash
-        run: rm -f ~/.ssh/deploy_key
+          # --- отправка: одним сообщением или несколькими подряд ------------
+          #
+          # Предел Telegram — 4096 единиц UTF-16 НА СООБЩЕНИЕ, и он жёсткий:
+          # текст длиннее API не режет, а ОТВЕРГАЕТ целиком. Раньше запаса
+          # хватало само собой — сообщение было в четыре строки; со списком
+          # изменений потолка у него нет. Режем ТОЛЬКО по границам строк: в
+          # строке стоит <a href="…">#21</a>, и рез посреди неё порвал бы тег,
+          # а невалидная разметка — снова отказ API. Код тот же, что в
+          # deploy.yml и static-site.yml.
+          LIMIT=4096
+          BUDGET=$(( LIMIT - 160 ))
+
+          if command -v jq >/dev/null 2>&1; then
+            # Считаем тем же счётом, что и Telegram, — в единицах UTF-16:
+            # символ вне BMP (эмодзи в шапке) занимает ДВЕ единицы.
+            line_len() { jq -Rrn 'inputs | ([explode[] | if . > 65535 then 2 else 1 end] | add // 0)'; }
+          else
+            # Без jq считаем байтами: в UTF-8 их всегда не меньше, чем единиц
+            # UTF-16, то есть оценка идёт В ЗАПАС.
+            line_len() { LC_ALL=C awk '{ print length($0) }'; }
+          fi
+
+          mapfile -t MSG_LINES <<< "$TEXT"
+          # tr -d '\r': вывод с CRLF дал бы «27\r», а для (( … )) это не число,
+          # но ошибка ТИХАЯ — условие просто ложно, и упаковка рассыпается на
+          # «по сообщению на строку».
+          mapfile -t MSG_LENS < <(printf '%s\n' "$TEXT" | line_len | tr -d '\r')
+
+          MEASURED=1
+          if (( ${#MSG_LENS[@]} != ${#MSG_LINES[@]} )); then
+            MEASURED=0
+          else
+            for n in "${MSG_LENS[@]}"; do
+              case "$n" in ''|*[!0-9]*) MEASURED=0; break ;; esac
+            done
+          fi
+
+          PARTS=()
+          if (( MEASURED == 0 )); then
+            echo "::warning::не удалось измерить сообщение — отправляю одним куском"
+            PARTS=("$TEXT")
+          else
+            cur=""; curlen=0; started=0
+            for i in "${!MSG_LINES[@]}"; do
+              l="${MSG_LINES[i]}"; n="${MSG_LENS[i]}"
+              if (( started == 0 )); then
+                cur="$l"; curlen=$n; started=1
+              elif (( curlen + 1 + n <= BUDGET )); then
+                cur="$cur"$'\n'"$l"; curlen=$(( curlen + 1 + n ))
+              else
+                PARTS+=("$cur"); cur="$l"; curlen=$n
+              fi
+            done
+            if (( started )); then PARTS+=("$cur"); fi
+          fi
+
+          TOTAL_PARTS=${#PARTS[@]}
+          PART_NO=0
+          for part in "${PARTS[@]}"; do
+            PART_NO=$(( PART_NO + 1 ))
+            if (( TOTAL_PARTS > 1 )); then
+              if (( PART_NO == 1 )); then
+                part="$part"$'\n'"<i>часть 1 из $TOTAL_PARTS — продолжение ниже</i>"
+              else
+                part="<b>$TITLE</b> — часть $PART_NO из $TOTAL_PARTS"$'\n'"$part"
+              fi
+            fi
+            # Ответ API РАЗБИРАЕТСЯ, а не выбрасывается: отвергнутое сообщение
+            # ничем иначе от отправленного не отличается — ни кодом curl, ни
+            # логом. В лог уходит только НОМЕР части и причина отказа: в
+            # остальном теле ответа Telegram возвращает эхом chat_id, а это
+            # секрет.
+            #
+            # Текст уезжает ЧЕРЕЗ STDIN (`text@-`), как в tg_send локальной
+            # выкатки. Этому job'у на ubuntu argv не страшен — но ровно этот
+            # шаг однажды уже жил на windows-раннере и уезжал в чат
+            # вопросиками (см. комментарий над job'ом): если его туда
+            # когда-нибудь вернут, stdin переживёт переезд, а argv — нет.
+            RESP="$(printf '%s' "$part" | curl -s -X POST "https://api.telegram.org/bot$TOKEN/sendMessage" \
+              -d chat_id="$CHAT" -d parse_mode=HTML -d disable_web_page_preview=true \
+              --data-urlencode "text@-" || true)"
+            # На первой же неудаче отправка прекращается: «1 из 3» и сразу
+            # «3 из 3» читается как «всё пришло».
+            case "$RESP" in
+              *'"ok":true'*) ;;
+              *)
+                WHY="$(printf '%s' "$RESP" \
+                  | sed -n 's/.*"description"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+                echo "::warning::Telegram не принял часть $PART_NO из $TOTAL_PARTS — уведомление дошло не полностью${WHY:+ ($WHY)}."
+                echo "::warning::Отправлено частей: $(( PART_NO - 1 )) из $TOTAL_PARTS, остальные не отправлялись."
+                break
+                ;;
+            esac
+          done
