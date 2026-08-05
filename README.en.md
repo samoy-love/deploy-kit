@@ -474,6 +474,7 @@ executable.
 | `bin/deploy` | one local deploy, the same path CI takes |
 | `bin/changelog` | the list of changes for a release message — one for every deployment path |
 | `bin/install-server` | ships `server/*.sh` to `/opt/deploy-kit` and the ownerless parts of `nginx/` |
+| `bin/selfupdate-upload` | launcher self-update build — into the admin panel, never touches `latest` |
 | `server/release.sh` | unpack → backup → switch → verify → roll back |
 | `server/rollback.sh` | manual rollback to the previous or a named release |
 | `server/preflight.sh` | disk space, `nginx -t`, unit state, release owner |
@@ -594,6 +595,13 @@ explicitly inside it), and the version is declared by `VERSION_CMD` — the same
 source the build validates against. After publishing, the checksum served by
 production is compared via `VERIFY_URL`; the previous file stays next to the
 new one as a `.prev` hard link for instant rollback.
+
+The `SELFUPDATE_URL` + `SELFUPDATE_ZIP` pair adds a third channel to a file
+target: the payload ZIP goes to the launcher admin panel
+(`bin/selfupdate-upload`, credentials come from the `ADMIN_USER` /
+`ADMIN_PASSWORD` secrets or `dk.conf`), and the server builds the version
+manifest. `latest.json` is never switched by automation: a human makes the
+version active in the admin panel — that is the boundary by design.
 
 What a project must provide to enter the pipeline: `/healthz` returning 200 and
 the body `ok` without authentication, `/version.json` with `version`, `commit`

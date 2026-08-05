@@ -4,12 +4,16 @@ name: desktop-artifact
 #
 # Отличие от остальных архетипов: у артефакта нет ни юнита, ни релизного
 # каталога с симлинком current. Собирается он на windows-раннере, а каналов
-# публикации два, и оба необязательные:
+# публикации три, и все необязательные:
 #
 #   * GitHub Release — только на теге: имя релиза берётся из имени ссылки;
 #   * файл на сервере выкатки (PUBLISH_DEST в описании цели) — установщик и
 #     его .sha256 атомарно подменяются в каталоге, который nginx раздаёт как
-#     есть. Именно этот канал делает «мерж в main обновляет кнопку „Скачать“».
+#     есть. Именно этот канал делает «мерж в main обновляет кнопку „Скачать“»;
+#   * сборка самообновления (SELFUPDATE_URL + SELFUPDATE_ZIP) — ZIP полезной
+#     нагрузки уезжает в админку лаунчера через bin/selfupdate-upload, сервер
+#     строит манифест версии. latest.json при этом НЕ переключается — версию
+#     активной делает человек в админке; см. шапку bin/selfupdate-upload.
 #
 # Основной способ вызова — описание цели, ОБЩЕЕ с локальной выкаткой
 # (`dk deploy` читает тот же файл и публикует тем же publish-file.sh):
@@ -22,9 +26,9 @@ name: desktop-artifact
 #       secrets: inherit
 #
 # Ключи описания: APP, BUILD_CMD (bash-строка; PowerShell зовётся в ней явно),
-# ARTIFACT_FILE, VERSION_CMD, PUBLISH_DEST, VERIFY_URL, NOTIFY. Описание цели
-# сильнее одноимённых входов — ровно как NGINX_CONF в static-site.yml: оно
-# ближе к выкатке и читается обоими путями.
+# ARTIFACT_FILE, VERSION_CMD, PUBLISH_DEST, VERIFY_URL, SELFUPDATE_URL,
+# SELFUPDATE_ZIP, NOTIFY. Описание цели сильнее одноимённых входов — ровно как
+# NGINX_CONF в static-site.yml: оно ближе к выкатке и читается обоими путями.
 #
 # Отдельные входы build/artifact/… остаются для проверочных сборок, которым
 # описание цели не нужно («собирается ли установщик вообще»).
@@ -101,7 +105,7 @@ jobs:
           IN_VERIFY_URL: ${{ inputs.verify-url }}
         run: |
           APP=""; BUILD_CMD=""; ARTIFACT_FILE=""; VERSION_CMD=""
-          PUBLISH_DEST=""; VERIFY_URL=""; NOTIFY=""
+          PUBLISH_DEST=""; VERIFY_URL=""; SELFUPDATE_URL=""; SELFUPDATE_ZIP=""; NOTIFY=""
           if [ -n "$CONFIG" ]; then
             # Путь обязан быть относительным и не выходить из репозитория —
             # ровно те же требования, что у config в static-site.yml.
@@ -145,8 +149,16 @@ jobs:
             echo "version_cmd=$VERSION_CMD"
             echo "upload_dest=$PUBLISH_DEST"
             echo "verify_url=$VERIFY_URL"
+            echo "selfupdate_url=$SELFUPDATE_URL"
+            echo "selfupdate_zip=$SELFUPDATE_ZIP"
             echo "notify=${NOTIFY:-all}"
           } >> "$GITHUB_OUTPUT"
+          # Половина канала самообновления без другой — молча пропущенный шаг,
+          # ровно как пара NGINX_CONF/NGINX_DEST в static-site.yml.
+          if [ -n "$SELFUPDATE_URL$SELFUPDATE_ZIP" ] && { [ -z "$SELFUPDATE_URL" ] || [ -z "$SELFUPDATE_ZIP" ]; }; then
+            echo "::error::SELFUPDATE_URL и SELFUPDATE_ZIP задаются парой — иначе сборка самообновления молча не уедет"
+            exit 1
+          fi
 
       - name: Версия релиза
         id: ver
@@ -331,6 +343,36 @@ jobs:
           fi
           echo "Проверено: $URL раздаёт свежую сумму $SHA"
 
+      # Третий канал: ZIP полезной нагрузки уезжает в админку лаунчера, сервер
+      # строит манифест версии. latest.json НЕ переключается — это граница
+      # автоматизации (см. шапки файла и bin/selfupdate-upload): активной
+      # версию делает человек в админке.
+      #
+      # Скрипт скачивается с main тем же способом, что bin/changelog в
+      # static-site.yml: логика одна на CI и локальную выкатку, копий нет.
+      # Его недоступность — отказ, а не пропуск: проверку, которую нельзя
+      # выполнить, нельзя и считать пройденной.
+      #
+      # Провал шага — провал job'а НАМЕРЕННО: установщик на сайте уже
+      # подменён, и молча оставить манифест несобранным значит разъехаться
+      # с ним до следующего релиза.
+      - name: Загрузить сборку самообновления
+        if: steps.cfg.outputs.selfupdate_url != ''
+        shell: bash
+        env:
+          SELFUPDATE_URL: ${{ steps.cfg.outputs.selfupdate_url }}
+          SELFUPDATE_ZIP: ${{ steps.cfg.outputs.selfupdate_zip }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          # Секреты репозитория проекта. ADMIN_PASSWORD_PLAIN — под тем же
+          # именем, под которым он в хозяйстве и лежит.
+          ADMIN_USER: ${{ secrets.ADMIN_USER }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD_PLAIN }}
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/tr0llex/deploy-kit/main/bin/selfupdate-upload -o /tmp/selfupdate-upload \
+            || { echo "::error::не удалось скачать bin/selfupdate-upload из deploy-kit — сборка самообновления не уедет"; exit 1; }
+          [ -s /tmp/selfupdate-upload ] || { echo "::error::bin/selfupdate-upload скачался пустым"; exit 1; }
+          bash /tmp/selfupdate-upload --url "$SELFUPDATE_URL" --zip "$SELFUPDATE_ZIP" --version "$VERSION"
+
       - name: Опубликовать в Release
         if: inputs.publish && startsWith(github.ref, 'refs/tags/')
         env:
@@ -372,6 +414,7 @@ jobs:
           STATUS: ${{ job.status }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           DOWNLOAD_URL: ${{ steps.cfg.outputs.verify_url }}
+          SELFUPDATE_URL: ${{ steps.cfg.outputs.selfupdate_url }}
         run: |
           # Правила NOTIFY те же, что у остальных целей: об успехе можно
           # молчать, о провале — нельзя.
@@ -390,8 +433,17 @@ jobs:
             if [ -n "$DOWNLOAD_URL" ]; then
               TEXT=$(printf '%s\n<a href="%s">скачать</a>' "$TEXT" "${DOWNLOAD_URL%.sha256}")
             fi
+            # Сборка самообновления уже в админке, но НЕАКТИВНА — и сообщение
+            # обязано напомнить про ручной шаг: иначе «опубликован» читается
+            # как «пользователи обновятся», а они не обновятся никогда.
+            if [ -n "$SELFUPDATE_URL" ]; then
+              TEXT=$(printf '%s\nсборка самообновления в админке; активной её делает переключение latest — руками' "$TEXT")
+            fi
           else
-            TEXT=$(printf '💥 <b>%s</b> — публикация провалена\n<code>%s</code>\nНа сайте остался прежний файл.\n<a href="%s">разобраться</a>' "$APP" "$VERSION" "$RUN_URL")
+            # Про «на сайте остался прежний файл» здесь больше не говорится:
+            # с каналом самообновления провал случается и ПОСЛЕ подмены файла,
+            # и утверждение стало бы враньём ровно в половине случаев.
+            TEXT=$(printf '💥 <b>%s</b> — публикация провалена\n<code>%s</code>\nЧто успело уехать — видно в прогоне.\n<a href="%s">разобраться</a>' "$APP" "$VERSION" "$RUN_URL")
           fi
           RESP="$(curl -s -X POST "https://api.telegram.org/bot$TOKEN/sendMessage" \
             -d chat_id="$CHAT" -d parse_mode=HTML -d disable_web_page_preview=true \

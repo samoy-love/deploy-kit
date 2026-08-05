@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# Загрузка сборки самообновления лаунчера в админку.
+#
+#   selfupdate-upload --url https://launcher.samoy.love/admin/api \
+#                     --zip scripts/generated_downloads/ChillHub-launcher-payload.zip \
+#                     --version 1.2.3
+#
+# Что делает: входит в админку (POST /auth/login, cookie-сессия) и публикует
+# ZIP полезной нагрузки (POST /upload) — сервер распаковывает архив и строит
+# манифест content/manifests/launcher/<версия>.json.
+#
+# ЧЕГО НЕ ДЕЛАЕТ — НАМЕРЕННО: latest.json не переключается никогда
+# (updateLatest=0 зашит, а не параметризован). Выложенная версия лежит на
+# сервере неактивной, пока человек не переключит «latest» в админке руками.
+# Это граница автоматизации, заданная владельцем: выкатка довозит сборку,
+# а решение «теперь обновляемся на неё» принимает человек.
+#
+# Учётные данные приходят ТОЛЬКО окружением: ADMIN_USER и ADMIN_PASSWORD.
+# В CI это секреты репозитория, на машине разработчика — dk.conf. Ни в
+# аргументах (видны в ps), ни в выводе (утекут в лог прогона) им не место;
+# в URL, которые печатаются, их не бывает.
+#
+# Зовут его двое, и это причина существования файла:
+#   * .github/workflows/desktop-artifact.yml — шагом после публикации
+#     установщика (скачивает скрипт с main, как bin/changelog);
+#   * bin/deploy (режим PUBLISH_DEST) — после publish-file.sh.
+#
+# Код возврата: 0 — сборка на сервере, 1 — нет. Провал загрузки — провал
+# выкатки установщика: exe на сайте уже подменён, и молча оставить манифест
+# несобранным значит разъехаться с ним навсегда.
+
+set -Eeuo pipefail
+
+RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33m'; DIM=$'\033[2m'; RST=$'\033[0m'
+[[ -t 1 ]] || { RED=''; GRN=''; YEL=''; DIM=''; RST=''; }
+ok()   { printf '%s✓%s %s\n' "$GRN" "$RST" "$*"; }
+warn() { printf '%s!%s %s\n' "$YEL" "$RST" "$*" >&2; }
+die()  { printf '%s✗%s %s\n' "$RED" "$RST" "$*" >&2; exit 1; }
+
+URL=""; ZIP=""; VER=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --url)     URL="$2"; shift 2 ;;
+        --zip)     ZIP="$2"; shift 2 ;;
+        --version) VER="$2"; shift 2 ;;
+        *) die "неизвестный аргумент: $1 (см. шапку файла)" ;;
+    esac
+done
+
+[[ -n "$URL" ]] || die "нужен --url (база админ-API, например https://launcher.samoy.love/admin/api)"
+[[ -n "$ZIP" ]] || die "нужен --zip"
+[[ -n "$VER" ]] || die "нужен --version"
+[[ -f "$ZIP" ]] || die "нет файла $ZIP — сборка не сделала ZIP самообновления?"
+[[ -s "$ZIP" ]] || die "файл $ZIP пуст"
+URL="${URL%/}"
+
+# Версия уезжает в имя манифеста на сервере; сервер проверяет её сам
+# (IsSafeVersion), но падать лучше здесь, до логина и до загрузки мегабайтов.
+[[ "$VER" =~ ^[A-Za-z0-9._-]+$ ]] || die "версия «$VER» не похожа на версию"
+
+[[ -n "${ADMIN_USER:-}" && -n "${ADMIN_PASSWORD:-}" ]] || die "нет ADMIN_USER/ADMIN_PASSWORD в окружении.
+   CI: задайте секреты репозитория. Локально: добавьте обе строки в ~/.config/deploy-kit/dk.conf"
+
+command -v curl >/dev/null 2>&1 || die "нет curl"
+
+# Cookie-сессия живёт в файле 0600 из mktemp и убирается ловушкой: токен
+# сессии — тот же секрет, что и пароль, и переживать скрипт ему незачем.
+JAR="$(mktemp -t dk-admin-XXXXXX)"
+trap 'rm -f "$JAR"' EXIT
+
+# Форма, а не JSON: логин принимает обе, а с формой пароль с кавычками и
+# слэшами не требует экранирования вовсе (--data-urlencode кодирует сам).
+# -f превращает 401 в ненулевой код; тело ответа при этом не печатается —
+# и не должно: в нём нечего читать, а причина и так одна из двух.
+if ! curl -fsS --max-time 30 -c "$JAR" -o /dev/null \
+        --data-urlencode "username=$ADMIN_USER" \
+        --data-urlencode "password=$ADMIN_PASSWORD" \
+        "$URL/auth/login"; then
+    die "логин в админку не прошёл ($URL/auth/login): неверные ADMIN_USER/ADMIN_PASSWORD либо админка недоступна"
+fi
+
+SIZE="$(du -h -- "$ZIP" | cut -f1)"
+printf '%s[%s]%s загружаю сборку %s (%s) в админку\n' "$DIM" "$(date -u -d '+3 hours' '+%H:%M:%S' 2>/dev/null || date '+%H:%M:%S')" "$RST" "$VER" "$SIZE"
+
+# updateLatest=0 ЗАШИТ — см. шапку. Ответ сервера — манифест опубликованной
+# версии; сверяем в нём версию, а не верим коду 200: прокси, отдавший 200 с
+# чужим телом, иначе сошёл бы за успех. Таймаут щедрый: ZIP под сотню
+# мегабайт едет с домашнего канала.
+RESP="$(curl -fsS --max-time 900 -b "$JAR" \
+    -F "kind=launcher" \
+    -F "gameId=launcher" \
+    -F "version=$VER" \
+    -F "updateLatest=0" \
+    -F "zip=@$ZIP;type=application/zip" \
+    "$URL/upload")" || die "админка не приняла сборку $VER (см. ответ сервера выше)"
+
+case "$RESP" in
+    *"\"version\""*"$VER"*) : ;;
+    *) die "админка ответила без версии $VER — публикация не подтверждена. Начало ответа: ${RESP:0:200}" ;;
+esac
+
+ok "сборка $VER на сервере: манифест manifests/launcher/$VER.json построен"
+printf '%s→%s latest.json НЕ переключён: активной версию делает человек в админке\n' "$YEL" "$RST"
+exit 0

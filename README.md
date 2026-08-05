@@ -451,6 +451,7 @@ bash bin/changelog --repo . --link-base https://github.com/tr0llex/deploy-kit
 | `bin/deploy` | одна локальная выкатка тем же путём, что и CI |
 | `bin/changelog` | список изменений для сообщения о релизе — один на все пути выкатки |
 | `bin/install-server` | выкладывает `server/*.sh` в `/opt/deploy-kit` и ничейное из `nginx/` |
+| `bin/selfupdate-upload` | сборка самообновления лаунчера — в админку, `latest` не трогает |
 | `server/release.sh` | распаковать → бэкап → переключить → проверить → откатить |
 | `server/rollback.sh` | ручной откат на предыдущий или названный релиз |
 | `server/preflight.sh` | место на диске, `nginx -t`, состояние юнитов, владелец |
@@ -568,6 +569,12 @@ VERIFY_URL=https://launcher.samoy.love/downloads/ChillHub-Setup.exe.sha256
 явно), версию объявляет `VERSION_CMD` — тот же источник, что сверяет сборка.
 После публикации сумма с прода сверяется по `VERIFY_URL`; прежний файл
 остаётся рядом жёсткой ссылкой `.prev` для мгновенного отката.
+
+Пара `SELFUPDATE_URL` + `SELFUPDATE_ZIP` добавляет цели-файлу третий канал:
+ZIP полезной нагрузки уезжает в админку лаунчера (`bin/selfupdate-upload`,
+учётка — `ADMIN_USER`/`ADMIN_PASSWORD` из секретов или `dk.conf`), и сервер
+строит манифест версии. `latest.json` при этом не переключается никогда:
+активной версию делает человек в админке — это граница автоматизации.
 
 Что проект обязан предоставить, чтобы попасть в пайплайн: `/healthz` с кодом
 200 и телом `ok` без авторизации, `/version.json` с полями `version`, `commit`
