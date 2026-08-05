@@ -63,10 +63,21 @@ URL="${URL%/}"
 
 command -v curl >/dev/null 2>&1 || die "нет curl"
 
+# ПУТИ ДЛЯ curl — ЧЕРЕЗ cygpath, ГДЕ ОН ЕСТЬ. Под Windows curl нативный:
+# POSIX-путь от mktemp (/tmp/…) он не понимает — «Failed to open/read local
+# data from file» на -F и молча не тот файл на -c/-b. cygpath -m даёт форму
+# C:/…, которую нативный curl читает; на Linux cygpath'а нет, путь идёт как
+# есть. Конвертируется ВСЁ, что curl открывает сам: архив, cookie-файл.
+native_path() {
+    if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi
+}
+
 # Cookie-сессия живёт в файле 0600 из mktemp и убирается ловушкой: токен
 # сессии — тот же секрет, что и пароль, и переживать скрипт ему незачем.
 JAR="$(mktemp -t dk-admin-XXXXXX)"
 trap 'rm -f "$JAR"' EXIT
+JAR_C="$(native_path "$JAR")"
+ZIP_C="$(native_path "$ZIP")"
 
 # Учётные данные уезжают JSON-телом ЧЕРЕЗ STDIN, а не аргументами curl и не
 # файлом. Причина та же, что у `text@-` в tg_send (см. bin/deploy): под
@@ -85,31 +96,60 @@ json_str() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
 # и не должно: в нём нечего читать, а причина и так одна из двух.
 if ! printf '{"username":"%s","password":"%s"}' \
         "$(json_str "$ADMIN_USER")" "$(json_str "$ADMIN_PASSWORD")" \
-    | curl -fsS --max-time 30 -c "$JAR" -o /dev/null \
+    | curl -fsS --max-time 30 -c "$JAR_C" -o /dev/null \
         -H 'Content-Type: application/json' \
         --data-binary @- \
         "$URL/auth/login"; then
     die "логин в админку не прошёл ($URL/auth/login): неверные ADMIN_USER/ADMIN_PASSWORD либо админка недоступна"
 fi
 
+# Мутирующие запросы админка принимает только с заголовком X-CSRF-Token,
+# равным cookie csrf_token из логина (double-submit, см. auth.go). Токен —
+# ASCII из генератора, через argv едет без потерь.
+CSRF="$(awk '$6 == "csrf_token" {v=$7} END {print v}' "$JAR")"
+[[ -n "$CSRF" ]] || die "логин прошёл, но cookie csrf_token в сессии нет — контракт админки изменился?"
+
 SIZE="$(du -h -- "$ZIP" | cut -f1)"
 printf '%s[%s]%s загружаю сборку %s (%s) в админку\n' "$DIM" "$(date -u -d '+3 hours' '+%H:%M:%S' 2>/dev/null || date '+%H:%M:%S')" "$RST" "$VER" "$SIZE"
 
-# updateLatest=0 ЗАШИТ — см. шапку. Ответ сервера — манифест опубликованной
-# версии; сверяем в нём версию, а не верим коду 200: прокси, отдавший 200 с
-# чужим телом, иначе сошёл бы за успех. Таймаут щедрый: ZIP под сотню
-# мегабайт едет с домашнего канала.
-RESP="$(curl -fsS --max-time 900 -b "$JAR" \
+# ЭНДПОИНТ — /uploadStream, А НЕ /upload, и это не выбор, а необходимость:
+# в nginx у админки описаны только `location ^~ /admin/api/upload/` (чанки,
+# со слэшем) и `location = /admin/api/uploadStream` — а голый /upload nginx
+# сам отправляет в 301 на вариант со слэшем, до бэкенда запрос не доходит.
+# Ровно этим же путём грузит сборки админка (admin.js), то есть путь один
+# и проверен ею ежедневно.
+#
+# updateLatest=0 ЗАШИТ — см. шапку.
+#
+# Ответ — NDJSON-поток событий по строке на файл; складываем в файл, а не в
+# переменную: у сборки лаунчера тысячи файлов. Успех — событие
+# {"type":"done","outPath":".../manifests/launcher/<версия>.json"}: сверяем и
+# тип, и версию в пути, а не верим коду 200 — прокси, отдавший 200 с чужим
+# телом, иначе сошёл бы за успех. Таймаут щедрый: ZIP под сотню мегабайт
+# едет с домашнего канала, а после него сервер ещё распаковывает и хеширует.
+EVENTS="$(mktemp -t dk-upload-XXXXXX)"
+trap 'rm -f "$JAR" "$EVENTS"' EXIT
+curl -fsSN --max-time 900 -b "$JAR_C" \
+    -H 'Accept: application/x-ndjson' \
+    -H "X-CSRF-Token: $CSRF" \
     -F "kind=launcher" \
     -F "gameId=launcher" \
     -F "version=$VER" \
     -F "updateLatest=0" \
-    -F "zip=@$ZIP;type=application/zip" \
-    "$URL/upload")" || die "админка не приняла сборку $VER (см. ответ сервера выше)"
+    -F "zip=@$ZIP_C;type=application/zip" \
+    "$URL/uploadStream" > "$EVENTS" \
+    || die "админка не приняла сборку $VER (см. ответ сервера выше)"
 
-case "$RESP" in
-    *"\"version\""*"$VER"*) : ;;
-    *) die "админка ответила без версии $VER — публикация не подтверждена. Начало ответа: ${RESP:0:200}" ;;
+# Ошибка приходит СОБЫТИЕМ в потоке при коде 200 — искать её надо в хвосте,
+# а не в коде возврата curl.
+if grep -q '"type":[[:space:]]*"error"' "$EVENTS"; then
+    die "админка отвергла сборку $VER: $(grep '"type":[[:space:]]*"error"' "$EVENTS" | tail -1 | head -c 300)"
+fi
+DONE="$(grep '"type":[[:space:]]*"done"' "$EVENTS" | tail -1)"
+case "$DONE" in
+    *"/$VER.json"*) : ;;
+    "") die "поток оборвался без события done — публикация не подтверждена. Хвост ответа: $(tail -c 300 "$EVENTS")" ;;
+    *)  die "событие done указывает не на версию $VER: ${DONE:0:200}" ;;
 esac
 
 ok "сборка $VER на сервере: манифест manifests/launcher/$VER.json построен"
