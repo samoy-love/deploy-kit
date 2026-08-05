@@ -455,6 +455,7 @@ bash bin/changelog --repo . --link-base https://github.com/tr0llex/deploy-kit
 | `server/rollback.sh` | ручной откат на предыдущий или названный релиз |
 | `server/preflight.sh` | место на диске, `nginx -t`, состояние юнитов, владелец |
 | `server/nginx-apply.sh` | дифф → бэкап → установка → `nginx -t` → откат |
+| `server/publish-file.sh` | атомарная подмена одного файла (установщик), `.prev` для отката |
 | `server/lib.sh` | мьютекс хоста, версионный шлюз, проверки, чистка релизов |
 | `ci/nginx-check.sh` | проверка конфига сайта настоящим nginx 1.24 в контейнере |
 | `ci/changelog-test.sh` | проверка `bin/changelog` на одноразовых git-репозиториях |
@@ -549,6 +550,24 @@ NOTIFY=all                          # all (по умолчанию) | fail | nev
 Этот же файл читает `dk deploy`. Цели, которые не раздают `version.json`,
 ставят `WRITE_VERSION_FILE=0` — тогда шлюз и проверка после выкатки читают имя
 релиза из симлинка `current`.
+
+Цель-файл — установщик, который публикуется подменой одного файла, а не
+релизным каталогом. Ключ `PUBLISH_DEST` переключает и `dk deploy`, и
+`desktop-artifact.yml` (вход `config`) на `publish-file.sh`:
+
+```bash
+APP=chillhub-installer
+BUILD_CMD="powershell -NoProfile -ExecutionPolicy Bypass -Command '…'"
+ARTIFACT_FILE=scripts/generated_downloads/ChillHub-Setup.exe
+VERSION_CMD="sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' …/App.csproj"
+PUBLISH_DEST=/var/www/site-downloads/ChillHub-Setup.exe
+VERIFY_URL=https://launcher.samoy.love/downloads/ChillHub-Setup.exe.sha256
+```
+
+`BUILD_CMD` здесь — bash-строка на обоих путях (PowerShell зовётся в ней
+явно), версию объявляет `VERSION_CMD` — тот же источник, что сверяет сборка.
+После публикации сумма с прода сверяется по `VERIFY_URL`; прежний файл
+остаётся рядом жёсткой ссылкой `.prev` для мгновенного отката.
 
 Что проект обязан предоставить, чтобы попасть в пайплайн: `/healthz` с кодом
 200 и телом `ok` без авторизации, `/version.json` с полями `version`, `commit`

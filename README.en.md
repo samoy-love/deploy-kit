@@ -478,6 +478,7 @@ executable.
 | `server/rollback.sh` | manual rollback to the previous or a named release |
 | `server/preflight.sh` | disk space, `nginx -t`, unit state, release owner |
 | `server/nginx-apply.sh` | diff → backup → install → `nginx -t` → revert |
+| `server/publish-file.sh` | atomic single-file replacement (installer), `.prev` for rollback |
 | `server/lib.sh` | host mutex, version gate, healthchecks, release pruning |
 | `ci/nginx-check.sh` | validates a site config in a real nginx 1.24 container |
 | `ci/changelog-test.sh` | validates `bin/changelog` against throwaway git repositories |
@@ -573,6 +574,26 @@ looks exactly like an applied config.
 The same file drives `dk deploy`. Targets that do not serve `version.json` set
 `WRITE_VERSION_FILE=0`; the gate and the post-deploy check then read the release
 name from the `current` symlink instead.
+
+A file target is an installer published by atomically replacing a single file
+rather than a release directory. The `PUBLISH_DEST` key switches both
+`dk deploy` and `desktop-artifact.yml` (its `config` input) to
+`publish-file.sh`:
+
+```bash
+APP=chillhub-installer
+BUILD_CMD="powershell -NoProfile -ExecutionPolicy Bypass -Command '…'"
+ARTIFACT_FILE=scripts/generated_downloads/ChillHub-Setup.exe
+VERSION_CMD="sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' …/App.csproj"
+PUBLISH_DEST=/var/www/site-downloads/ChillHub-Setup.exe
+VERIFY_URL=https://launcher.samoy.love/downloads/ChillHub-Setup.exe.sha256
+```
+
+`BUILD_CMD` here is a bash string on both paths (PowerShell is invoked
+explicitly inside it), and the version is declared by `VERSION_CMD` — the same
+source the build validates against. After publishing, the checksum served by
+production is compared via `VERIFY_URL`; the previous file stays next to the
+new one as a `.prev` hard link for instant rollback.
 
 What a project must provide to enter the pipeline: `/healthz` returning 200 and
 the body `ok` without authentication, `/version.json` with `version`, `commit`
