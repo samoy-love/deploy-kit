@@ -35,6 +35,14 @@
 #                                  `git remote get-url origin`; none — не
 #                                  ставить ссылок вовсе.
 #
+# Цель-файл (установщик): вместо ARTIFACT_DIR/ROOT — публикация одного файла
+# через publish-file.sh, см. .deploy-kit/installer.env у chillhub:
+#
+#   ARTIFACT_FILE=scripts/generated_downloads/ChillHub-Setup.exe
+#   PUBLISH_DEST=/var/www/site-downloads/ChillHub-Setup.exe
+#   VERSION_CMD="sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' …"  версия сборки
+#   VERIFY_URL=https://…/ChillHub-Setup.exe.sha256    сверка суммы с прода
+#
 # Список изменений уходит в чат ЦЕЛИКОМ. Не влезает в одно сообщение Telegram —
 # уезжает несколькими подряд, а не режется: см. notify() ниже.
 #
@@ -85,7 +93,7 @@ while [[ $# -gt 0 ]]; do
         # Диапазон совпадает с шапкой файла: правите шапку — правите число.
         # Раньше здесь стояло 30, и справка обрывалась посреди списка ключей
         # описания цели — ровно на том месте, ради которого её и открывают.
-        -h|--help)  sed -n '2,44p' "$0"; exit 0 ;;
+        -h|--help)  sed -n '2,52p' "$0"; exit 0 ;;
         *) die "неизвестный аргумент: $1" ;;
     esac
 done
@@ -162,8 +170,30 @@ dk_conf_load
 source "$CONFIG"
 
 : "${APP:?в описании нет APP}"
-: "${ARTIFACT_DIR:?в описании нет ARTIFACT_DIR}"
-: "${ROOT:?в описании нет ROOT}"
+
+# Цели бывают двух форм, и различает их PUBLISH_DEST.
+#
+# Обычная цель — каталог-артефакт, который едет релизом: releases/, симлинк
+# current, version.json, release.sh. Цель-файл (установщик лаунчера) в эту
+# механику не помещается сознательно: один файл на четверть гигабайта живёт
+# вне релизов сайта и «выкатить» его значит атомарно подменить — это делает
+# publish-file.sh на сервере, тот же скрипт, которым публикует пайплайн
+# (desktop-artifact.yml читает ЭТО ЖЕ описание через вход config).
+#
+# У цели-файла: ARTIFACT_FILE (что публиковать), PUBLISH_DEST (куда),
+# VERSION_CMD (кто объявляет версию — например, <Version> из csproj),
+# VERIFY_URL (сверка суммы с прода после публикации), HEALTH (ссылка
+# «открыть» в уведомлении). ROOT, UNIT, KEEP и version.json к ней не
+# применимы и в описании не задаются.
+PUBLISH_MODE=0
+if [[ -n "${PUBLISH_DEST:-}" ]]; then
+    PUBLISH_MODE=1
+    : "${ARTIFACT_FILE:?у цели с PUBLISH_DEST в описании нет ARTIFACT_FILE}"
+    [[ "$PUBLISH_DEST" == /* ]] || die "PUBLISH_DEST должен быть абсолютным путём, получено: $PUBLISH_DEST"
+else
+    : "${ARTIFACT_DIR:?в описании нет ARTIFACT_DIR}"
+    : "${ROOT:?в описании нет ROOT}"
+fi
 DEPLOY_HOST="${DEPLOY_HOST:?нет DEPLOY_HOST}"
 DEPLOY_USER="${DEPLOY_USER:-ubuntu}"
 DEPLOY_KEY="${DEPLOY_KEY:-$HOME/.ssh/id_ed25519}"
@@ -202,10 +232,26 @@ else
     VERSION="$KIND-$(msk '%Y%m%d-%H%M%S')"
 fi
 
+# У цели-файла версию объявляет сам проект, а не метка manual-<дата>: она
+# уезжает В СБОРКУ (у лаунчера — в launcher.version каждому скачавшему) и
+# обязана совпадать с тем, что проект считает своей версией. Ровно ту же
+# команду выполняет шаг «Версия релиза» в desktop-artifact.yml — источник
+# один на оба пути. Молчаливого запасного значения нет: публиковать
+# установщик с заглушкой вместо версии нельзя.
+if (( PUBLISH_MODE )); then
+    [[ -n "${VERSION_CMD:-}" ]] || die "у цели с PUBLISH_DEST в описании нет VERSION_CMD — версию сборки объявляет проект"
+    VERSION="$(bash -c "$VERSION_CMD" | tr -d ' \t\r\n')"
+    [[ -n "$VERSION" ]] || die "VERSION_CMD не напечатала версию — публиковать сборку без версии нельзя"
+fi
+
 echo "приложение:  $APP"
 echo "версия:      $VERSION"
 echo "сервер:      $DEPLOY_USER@$DEPLOY_HOST"
-echo "каталог:     $ROOT"
+if (( PUBLISH_MODE )); then
+    echo "файл:        $PUBLISH_DEST"
+else
+    echo "каталог:     $ROOT"
+fi
 
 # --- сборка ---------------------------------------------------------------
 #
@@ -255,9 +301,14 @@ if (( BUILD )) && [[ -n "${BUILD_CMD:-}" ]]; then
         ok "собрано"
     fi
 fi
-# В dry-run сборки не было, поэтому и каталога может не быть — это не ошибка.
+# В dry-run сборки не было, поэтому и артефакта может не быть — это не ошибка.
 if ! (( DRY )); then
-    [[ -d "$ARTIFACT_DIR" ]] || die "нет каталога $ARTIFACT_DIR — сборка не выполнялась?"
+    if (( PUBLISH_MODE )); then
+        [[ -f "$ARTIFACT_FILE" ]] || die "нет файла $ARTIFACT_FILE — сборка не выполнялась?"
+        [[ -s "$ARTIFACT_FILE" ]] || die "файл $ARTIFACT_FILE пуст — публиковать нечего"
+    else
+        [[ -d "$ARTIFACT_DIR" ]] || die "нет каталога $ARTIFACT_DIR — сборка не выполнялась?"
+    fi
 fi
 
 # --- список изменений -----------------------------------------------------
@@ -484,7 +535,11 @@ json_escape() {
     printf '%s' "$out"
 }
 
-if [[ "${WRITE_VERSION_FILE:-1}" == "1" ]] && ! (( DRY )); then
+# У цели-файла version.json не бывает: артефакт — один файл, класть отметку
+# некуда, а сверку «прод раздаёт именно эту сборку» делает VERIFY_URL ниже.
+if (( PUBLISH_MODE )); then
+    :
+elif [[ "${WRITE_VERSION_FILE:-1}" == "1" ]] && ! (( DRY )); then
     # Кладём в public/, если он есть: сервис раздаёт статику именно оттуда,
     # и только так файл окажется доступен по /version.json — а значит, шаг
     # сверки версии сможет отличить «выкатилось» от «выглядит выкаченным».
@@ -686,9 +741,15 @@ notify() {
         return 0
     fi
 
+    # У цели-файла глагол другой: она не «выкатывается» релизом, а публикуется
+    # подменой файла. Слово то же, что в сообщении desktop-artifact.yml, чтобы
+    # лента в чате читалась одинаково с обоих путей.
+    local verb="выкачен" fail_what="выкатка"
+    if (( PUBLISH_MODE )); then verb="опубликован"; fail_what="публикация"; fi
+
     local text cont=""
     if [[ "$status" == success ]]; then
-        text=$(printf '🚀 <b>%s</b> выкачен\n<code>%s</code>\nвыкатка с машины разработчика' "$APP" "$VERSION")
+        text=$(printf '🚀 <b>%s</b> %s\n<code>%s</code>\nвыкатка с машины разработчика' "$APP" "$verb" "$VERSION")
         [[ -n "${HEALTH:-}" ]] && text=$(printf '%s\n<a href="%s">открыть</a>' "$text" "$HEALTH")
 
         # Список изменений — общий генератор на все пути выкатки (два workflow
@@ -712,7 +773,7 @@ notify() {
         cont=$(printf '🚀 <b>%s</b> <code>%s</code> — продолжение списка изменений' "$APP" "$VERSION")
         split_msgs "$text" "$cont" "${CHANGELOG:-}"
     else
-        text=$(printf '💥 <b>%s</b> — выкатка провалена\n<code>%s</code>\nвыкатка с машины разработчика' "$APP" "$VERSION")
+        text=$(printf '💥 <b>%s</b> — %s провалена\n<code>%s</code>\nвыкатка с машины разработчика' "$APP" "$fail_what" "$VERSION")
         split_msgs "$text" "" ""
     fi
 
@@ -775,6 +836,48 @@ cleanup() {
     notify "$DEPLOY_STATUS"
 }
 trap cleanup EXIT
+
+# --- публикация цели-файла ---------------------------------------------------
+#
+# Путь короткий и свой: ни упаковки, ни preflight, ни release.sh. Сумма
+# считается здесь, проверяется publish-file.sh на сервере ДО подмены (обрыв
+# scp не доедет до пользователей) и сверяется с прода ПОСЛЕ («зелёный деплой
+# со старыми файлами» ловится ровно здесь — как сверка /version.json у
+# обычных целей). Шаги и их порядок — те же, что в desktop-artifact.yml.
+if (( PUBLISH_MODE )); then
+    if (( DRY )); then
+        log "публикация пропущена (dry-run): $ARTIFACT_FILE → $PUBLISH_DEST"
+        DEPLOY_STATUS=success
+        exit 0
+    fi
+
+    command -v sha256sum >/dev/null 2>&1 || die "нет команды sha256sum"
+    SHA="$(sha256sum -- "$ARTIFACT_FILE" | cut -d' ' -f1)"
+    BASE="$(basename -- "$PUBLISH_DEST")"
+    printf '%s  %s\n' "$SHA" "$BASE" > "$ARTIFACT_FILE.sha256"
+    ok "артефакт: $(du -h -- "$ARTIFACT_FILE" | cut -f1), SHA-256 $SHA"
+
+    remote_tmp
+    log "загружаю артефакт"
+    "${SCP[@]}" "$ARTIFACT_FILE" "$DEPLOY_USER@$DEPLOY_HOST:$REMOTE_TMP/$BASE"
+    "${SCP[@]}" "$ARTIFACT_FILE.sha256" "$DEPLOY_USER@$DEPLOY_HOST:$REMOTE_TMP/$BASE.sha256"
+
+    log "публикую на сервере"
+    PUB_ARGS=(--file "$REMOTE_TMP/$BASE" --sha256 "$REMOTE_TMP/$BASE.sha256" --dest "$PUBLISH_DEST")
+    "${SSH[@]}" "sudo /opt/deploy-kit/publish-file.sh $(printf '%q ' "${PUB_ARGS[@]}")" \
+        || die "публикация $APP провалена — на сервере остался прежний файл"
+
+    if [[ -n "${VERIFY_URL:-}" ]]; then
+        GOT="$(curl -fsS --max-time 30 "$VERIFY_URL" 2>/dev/null | awk '{print tolower($1); exit}' || true)"
+        [[ -n "$GOT" ]] || die "$VERIFY_URL не отдал контрольную сумму — публикация не подтверждена"
+        [[ "$GOT" == "$SHA" ]] || die "прод раздаёт другую сборку: собрано $SHA, по адресу $VERIFY_URL лежит $GOT"
+        ok "проверено: $VERIFY_URL раздаёт свежую сумму"
+    fi
+
+    DEPLOY_STATUS=success
+    ok "готово: $APP $VERSION"
+    exit 0
+fi
 
 if (( DRY )); then
     log "упаковка пропущена (dry-run)"

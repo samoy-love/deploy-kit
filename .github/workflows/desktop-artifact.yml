@@ -7,31 +7,46 @@ name: desktop-artifact
 # публикации два, и оба необязательные:
 #
 #   * GitHub Release — только на теге: имя релиза берётся из имени ссылки;
-#   * файл на сервере выкатки (вход upload-dest) — установщик и его .sha256
-#     атомарно подменяются в каталоге, который nginx раздаёт как есть.
-#     Именно этот канал делает «мерж в main обновляет кнопку „Скачать“».
+#   * файл на сервере выкатки (PUBLISH_DEST в описании цели) — установщик и
+#     его .sha256 атомарно подменяются в каталоге, который nginx раздаёт как
+#     есть. Именно этот канал делает «мерж в main обновляет кнопку „Скачать“».
+#
+# Основной способ вызова — описание цели, ОБЩЕЕ с локальной выкаткой
+# (`dk deploy` читает тот же файл и публикует тем же publish-file.sh):
 #
 #   jobs:
 #     installer:
 #       uses: tr0llex/deploy-kit/.github/workflows/desktop-artifact.yml@main
 #       with:
-#         build: ./scripts/build-installer.ps1 -Configuration Release -AppVersion $env:DEPLOY_VERSION
-#         artifact: scripts/generated_downloads/ChillHub-Setup.exe
-#         upload-dest: /var/www/site-downloads/ChillHub-Setup.exe
-#         verify-url: https://example.com/downloads/ChillHub-Setup.exe.sha256
+#         config: .deploy-kit/installer.env
 #       secrets: inherit
+#
+# Ключи описания: APP, BUILD_CMD (bash-строка; PowerShell зовётся в ней явно),
+# ARTIFACT_FILE, VERSION_CMD, PUBLISH_DEST, VERIFY_URL, NOTIFY. Описание цели
+# сильнее одноимённых входов — ровно как NGINX_CONF в static-site.yml: оно
+# ближе к выкатке и читается обоими путями.
+#
+# Отдельные входы build/artifact/… остаются для проверочных сборок, которым
+# описание цели не нужно («собирается ли установщик вообще»).
 
 on:
   workflow_call:
     inputs:
+      config:
+        description: 'Файл описания цели в репозитории проекта (.deploy-kit/installer.env)'
+        required: false
+        type: string
+        default: ''
       build:
-        description: 'Команда сборки (PowerShell)'
-        required: true
+        description: 'Команда сборки (PowerShell); используется, когда config не задан'
+        required: false
         type: string
+        default: ''
       artifact:
-        description: 'Путь к готовому установщику'
-        required: true
+        description: 'Путь к готовому установщику; используется, когда config не задан'
+        required: false
         type: string
+        default: ''
       gates:
         description: 'Проверки перед сборкой (PowerShell), необязательно'
         required: false
@@ -68,13 +83,78 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Дальше шаги смотрят ТОЛЬКО на выходы этого шага, а не на inputs:
+      # эффективное значение каждого параметра считается один раз и здесь.
+      # Правило старшинства то же, что у NGINX_CONF в static-site.yml:
+      # описание цели сильнее одноимённого входа — оно ближе к выкатке и его
+      # же читает dk deploy. Задано и то и другое — берём описание и говорим
+      # об этом вслух.
+      - name: Прочитать описание цели
+        id: cfg
+        shell: bash
+        env:
+          CONFIG: ${{ inputs.config }}
+          IN_BUILD: ${{ inputs.build }}
+          IN_ARTIFACT: ${{ inputs.artifact }}
+          IN_VERSION_CMD: ${{ inputs.version-cmd }}
+          IN_UPLOAD_DEST: ${{ inputs.upload-dest }}
+          IN_VERIFY_URL: ${{ inputs.verify-url }}
+        run: |
+          APP=""; BUILD_CMD=""; ARTIFACT_FILE=""; VERSION_CMD=""
+          PUBLISH_DEST=""; VERIFY_URL=""; NOTIFY=""
+          if [ -n "$CONFIG" ]; then
+            # Путь обязан быть относительным и не выходить из репозитория —
+            # ровно те же требования, что у config в static-site.yml.
+            case "$CONFIG" in
+              /*|*..*) echo "::error::config должен быть относительным путём внутри репозитория, получено: $CONFIG"; exit 1 ;;
+            esac
+            [ -f "$CONFIG" ] || { echo "::error::нет файла $CONFIG"; exit 1; }
+            set -a
+            # Путь к описанию цели приходит параметром workflow — проследить
+            # его статически нельзя, и это осознанно: файл принадлежит проекту.
+            # shellcheck disable=SC1090
+            . "./$CONFIG"
+            set +a
+            for pair in "build:$IN_BUILD" "artifact:$IN_ARTIFACT" "version-cmd:$IN_VERSION_CMD" "upload-dest:$IN_UPLOAD_DEST" "verify-url:$IN_VERIFY_URL"; do
+              [ -n "${pair#*:}" ] && echo "::warning::задан и config, и вход ${pair%%:*} — беру значение из описания цели"
+            done
+          else
+            ARTIFACT_FILE="$IN_ARTIFACT"
+            VERSION_CMD="$IN_VERSION_CMD"
+            PUBLISH_DEST="$IN_UPLOAD_DEST"
+            VERIFY_URL="$IN_VERIFY_URL"
+          fi
+          # Сборка обязана быть задана ровно одним способом: BUILD_CMD из
+          # описания — bash-строка (общая с dk deploy), вход build — PowerShell
+          # (прежний контракт). Выполняются они разными шагами ниже.
+          if [ -n "$CONFIG" ]; then
+            [ -n "$BUILD_CMD" ] || { echo "::error::в $CONFIG нет BUILD_CMD"; exit 1; }
+            [ -n "$ARTIFACT_FILE" ] || { echo "::error::в $CONFIG нет ARTIFACT_FILE"; exit 1; }
+          else
+            [ -n "$IN_BUILD" ] || { echo "::error::нужен вход config либо build"; exit 1; }
+            [ -n "$ARTIFACT_FILE" ] || { echo "::error::нужен вход artifact"; exit 1; }
+          fi
+          # Какой из двух шагов сборки исполнится, решают эти два выхода:
+          # заполнен всегда ровно один.
+          BUILD_PWSH=""; [ -z "$CONFIG" ] && BUILD_PWSH="$IN_BUILD"
+          {
+            echo "app=${APP:-установщик}"
+            echo "build_bash=${CONFIG:+$BUILD_CMD}"
+            echo "build_pwsh=$BUILD_PWSH"
+            echo "artifact=$ARTIFACT_FILE"
+            echo "version_cmd=$VERSION_CMD"
+            echo "upload_dest=$PUBLISH_DEST"
+            echo "verify_url=$VERIFY_URL"
+            echo "notify=${NOTIFY:-all}"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Версия релиза
         id: ver
         shell: bash
         env:
           # Через env, а не подстановкой в тело — см. пояснение у шага
           # «Проверки» ниже: у workflow токен с правом contents: write.
-          VERSION_CMD: ${{ inputs.version-cmd }}
+          VERSION_CMD: ${{ steps.cfg.outputs.version_cmd }}
         run: |
           # Без префикса release-: эта версия уезжает в NSIS как AppVersion,
           # а он ждёт числовой вид. Релизным каталогом установщик не кладётся
@@ -91,7 +171,15 @@ jobs:
           #
           # Заглушка остаётся для вызовов без version-cmd — проверочных
           # сборок, которым нужен только сам факт «собирается».
+          # Ведущая `v` из тега СНИМАЕТСЯ ЗДЕСЬ, до того как версию увидит
+          # хоть кто-нибудь. Тег называется v1.2.3, а версия уезжает в сборку
+          # и сравнивается с версией приложения ПОСИМВОЛЬНО: «v1.2.3» против
+          # «1.2.3» — это у лаунчера вечный цикл самообновления у каждого,
+          # кто поставит такой билд. Раньше срез делала команда сборки в
+          # проекте — теперь она общая с локальной выкаткой и про теги не
+          # знает, поэтому срез живёт у единственного источника тегов.
           V="$(git describe --tags --exact-match 2>/dev/null || true)"
+          V="${V#v}"
           if [ -z "$V" ] && [ -n "$VERSION_CMD" ]; then
             V="$(eval "$VERSION_CMD" | tr -d ' \t\r\n')"
             [ -n "$V" ] || { echo "::error::version-cmd не напечатала версию — публиковать сборку с заглушкой вместо версии нельзя"; exit 1; }
@@ -111,18 +199,31 @@ jobs:
           GATES: ${{ inputs.gates }}
         run: Invoke-Expression $env:GATES
 
+      # Сборка — двумя взаимоисключающими шагами: BUILD_CMD из описания цели —
+      # bash-строка (та же, что выполняет dk deploy, PowerShell в ней зовётся
+      # явно), вход build — PowerShell, прежний контракт проверочных сборок.
+      # Заполнен всегда ровно один выход — см. шаг «Прочитать описание цели».
       - name: Собрать установщик
+        if: steps.cfg.outputs.build_bash != ''
+        shell: bash
+        env:
+          DEPLOY_VERSION: ${{ steps.ver.outputs.version }}
+          BUILD: ${{ steps.cfg.outputs.build_bash }}
+        run: eval "$BUILD"
+
+      - name: Собрать установщик (PowerShell)
+        if: steps.cfg.outputs.build_pwsh != ''
         shell: pwsh
         env:
           DEPLOY_VERSION: ${{ steps.ver.outputs.version }}
-          BUILD: ${{ inputs.build }}
+          BUILD: ${{ steps.cfg.outputs.build_pwsh }}
         run: Invoke-Expression $env:BUILD
 
       - name: Чексумма
         id: sum
         shell: bash
         env:
-          ARTIFACT: ${{ inputs.artifact }}
+          ARTIFACT: ${{ steps.cfg.outputs.artifact }}
         run: |
           F="$ARTIFACT"
           [ -f "$F" ] || { echo "::error::сборка не создала $F"; exit 1; }
@@ -150,8 +251,8 @@ jobs:
         with:
           name: installer-${{ steps.ver.outputs.version }}
           path: |
-            ${{ inputs.artifact }}
-            ${{ inputs.artifact }}.sha256
+            ${{ steps.cfg.outputs.artifact }}
+            ${{ steps.cfg.outputs.artifact }}.sha256
           retention-days: 30
 
       # ---------------- публикация на сервер выкатки (вход upload-dest) ----
@@ -161,7 +262,7 @@ jobs:
       # в профиль раннера — известные хосты и ключ читаются оттуда же, откуда
       # их читает ssh.
       - name: Настроить SSH
-        if: inputs.upload-dest != ''
+        if: steps.cfg.outputs.upload_dest != ''
         shell: bash
         env:
           KEY: ${{ secrets.DEPLOY_SSH_KEY }}
@@ -185,13 +286,13 @@ jobs:
       # в шаге «Выкатить» static-site.yml: файл читает publish-file.sh под
       # sudo, и между scp и установкой не должно быть окна для подмены.
       - name: Выложить на сервер
-        if: inputs.upload-dest != ''
+        if: steps.cfg.outputs.upload_dest != ''
         shell: bash
         env:
           HOST: ${{ secrets.DEPLOY_HOST }}
           USER: ${{ secrets.DEPLOY_USER }}
-          ARTIFACT: ${{ inputs.artifact }}
-          UPLOAD_DEST: ${{ inputs.upload-dest }}
+          ARTIFACT: ${{ steps.cfg.outputs.artifact }}
+          UPLOAD_DEST: ${{ steps.cfg.outputs.upload_dest }}
         run: |
           REMOTE_DIR="$(ssh -i ~/.ssh/deploy_key "$USER@$HOST" 'mktemp -d /tmp/dk-XXXXXXXXXX' | tr -d '\r' | tail -1)"
           case "$REMOTE_DIR" in
@@ -210,10 +311,10 @@ jobs:
       # посчитанная на раннере, сверяется с той, что РАЗДАЁТ прод. Это тот же
       # смысл, что сверка /version.json после выкатки сайта.
       - name: Сверить с прода
-        if: inputs.upload-dest != '' && inputs.verify-url != ''
+        if: steps.cfg.outputs.upload_dest != '' && steps.cfg.outputs.verify_url != ''
         shell: bash
         env:
-          URL: ${{ inputs.verify-url }}
+          URL: ${{ steps.cfg.outputs.verify_url }}
           SHA: ${{ steps.sum.outputs.sha }}
         run: |
           GOT="$(curl -fsS --max-time 30 "$URL" | awk '{print tolower($1); exit}')"
@@ -232,7 +333,7 @@ jobs:
           # contents: write, а имя тега ставит человек — то есть это значение
           # приходит извне пайплайна. См. шаг «Проверки».
           TAG: ${{ github.ref_name }}
-          ARTIFACT: ${{ inputs.artifact }}
+          ARTIFACT: ${{ steps.cfg.outputs.artifact }}
           VERSION: ${{ steps.ver.outputs.version }}
           SHA: ${{ steps.sum.outputs.sha }}
         shell: bash
@@ -254,29 +355,37 @@ jobs:
       # ответ API разбирается, неудача отправки job не красит, о провале
       # молчать нельзя.
       - name: Уведомить в Telegram
-        if: always() && inputs.upload-dest != ''
+        if: always() && steps.cfg.outputs.upload_dest != ''
         shell: bash
         env:
           TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          APP: ${{ steps.cfg.outputs.app }}
           VERSION: ${{ steps.ver.outputs.version }}
+          NOTIFY: ${{ steps.cfg.outputs.notify }}
           STATUS: ${{ job.status }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          DOWNLOAD_URL: ${{ inputs.verify-url }}
+          DOWNLOAD_URL: ${{ steps.cfg.outputs.verify_url }}
         run: |
+          # Правила NOTIFY те же, что у остальных целей: об успехе можно
+          # молчать, о провале — нельзя.
+          case "${NOTIFY:-all}:$STATUS" in
+            never:*)      exit 0 ;;
+            fail:success) exit 0 ;;
+          esac
           if [ -z "$TOKEN" ] || [ -z "$CHAT" ]; then
             echo "::warning::TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID не заданы — о публикации установщика никто не узнал"
             exit 0
           fi
           if [ "$STATUS" = "success" ]; then
-            TEXT=$(printf '🚀 <b>установщик</b> опубликован\n<code>%s</code>' "$VERSION")
+            TEXT=$(printf '🚀 <b>%s</b> опубликован\n<code>%s</code>' "$APP" "$VERSION")
             # Ссылка ведёт на сам файл: verify-url — это <файл>.sha256,
             # хвост срезается. Пустой verify-url — просто без ссылки.
             if [ -n "$DOWNLOAD_URL" ]; then
               TEXT=$(printf '%s\n<a href="%s">скачать</a>' "$TEXT" "${DOWNLOAD_URL%.sha256}")
             fi
           else
-            TEXT=$(printf '💥 <b>установщик</b> — публикация провалена\n<code>%s</code>\nНа сайте остался прежний файл.\n<a href="%s">разобраться</a>' "$VERSION" "$RUN_URL")
+            TEXT=$(printf '💥 <b>%s</b> — публикация провалена\n<code>%s</code>\nНа сайте остался прежний файл.\n<a href="%s">разобраться</a>' "$APP" "$VERSION" "$RUN_URL")
           fi
           RESP="$(curl -s -X POST "https://api.telegram.org/bot$TOKEN/sendMessage" \
             -d chat_id="$CHAT" -d parse_mode=HTML -d disable_web_page_preview=true \
@@ -287,6 +396,6 @@ jobs:
           esac
 
       - name: Убрать ключ
-        if: always() && inputs.upload-dest != ''
+        if: always() && steps.cfg.outputs.upload_dest != ''
         shell: bash
         run: rm -f ~/.ssh/deploy_key
