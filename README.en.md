@@ -158,8 +158,9 @@ install-server --apply      # upload (only what is merged into main)
 Static sites and Go services announce their deploys in Telegram — from the
 pipeline and from a developer machine alike. On success the message says what
 shipped and in which version, links to the component and carries the list of
-changes; on failure it stays short and about the failure. (The Windows installer
-announces nothing: it is published to a GitHub Release rather than deployed.)
+changes; on failure it stays short and about the failure. The Windows installer
+announces its publication the same way — in a separate ubuntu job (see the
+comment on the notify job in desktop-artifact.yml).
 
 A local deploy takes the token and the chat from where it takes the host and the
 key: `bin/deploy` reads `~/.config/deploy-kit/dk.conf` **itself** (`DK_CONF`
