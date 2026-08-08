@@ -38,6 +38,14 @@ inputs:
     description: 'Список изменений: по пункту на строку, простой текст'
     required: false
     default: ''
+  changelog-html:
+    description: >
+      ПУТЬ к файлу с дословным выводом bin/changelog (готовый HTML). Приведение
+      разметки к тексту делает lib/notify.sh, здесь второго нормализатора нет.
+      Имя входа повторяет имя флага доставки намеренно: одно и то же значит
+      одно и то же по всей цепочке.
+    required: false
+    default: ''
   commit-url:
     description: 'Адрес коммита. По умолчанию — коммит, вызвавший прогон'
     required: false
@@ -97,6 +105,7 @@ runs:
         DK_VERSION: ${{ inputs.version }}
         DK_PREVIOUS: ${{ inputs.previous }}
         DK_CHANGELOG: ${{ inputs.changelog }}
+        DK_CHANGELOG_HTML: ${{ inputs.changelog-html }}
         DK_STAGE: ${{ inputs.stage }}
         DK_REASON: ${{ inputs.reason }}
         DK_NOTIFY: ${{ inputs.notify }}
@@ -284,6 +293,18 @@ runs:
         if [ -n "$DK_CHANGELOG" ]; then
           printf '%s\n' "$DK_CHANGELOG" > "$WORK/changelog.txt"
           ARGS+=(--changelog-file "$WORK/changelog.txt")
+        fi
+
+        # Готовый HTML генератора едет отдельным флагом: приводит его к тексту
+        # lib/notify.sh, и только он. Пустой файл — не ошибка, а обычное дело:
+        # пайплайн обнуляет его на событиях, где считать нечего, и карточка
+        # тогда едет без блока изменений, как и раньше.
+        if [ -n "$DK_CHANGELOG_HTML" ]; then
+          if [ ! -f "$DK_CHANGELOG_HTML" ]; then
+            echo "::warning::нет файла списка изменений $DK_CHANGELOG_HTML — карточка уедет без него"
+          elif [ -s "$DK_CHANGELOG_HTML" ]; then
+            ARGS+=(--changelog-html "$DK_CHANGELOG_HTML")
+          fi
         fi
 
         RC=0

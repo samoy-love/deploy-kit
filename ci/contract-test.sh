@@ -891,6 +891,27 @@ else
 fi
 
 # --------------------------------------------------------------------------
+# Список изменений доезжает до карточки в чате.
+#
+# Он не доезжал месяц, и молча: генератор считал его исправно, version.json
+# получал, а событие — нет, потому что у действия просто не было входа для
+# готового HTML. В чате это выглядело как «бот пишет, но changelog никогда не
+# показывает», и отличить это от «изменений не было» на глаз нельзя.
+for WF in "$KIT/.github/workflows/static-site.yml" "$KIT/.github/workflows/go-service.yml"; do
+    NAME="$(basename "$WF")"
+    if grep -q 'changelog-html:' "$WF"; then
+        ok "$NAME передаёт список изменений в событие"
+    else
+        bad "$NAME не передаёт changelog-html — карточка уедет без изменений"
+    fi
+done
+if grep -q 'changelog-html:' "$KIT/.github/actions/notify/action.yml"; then
+    ok "у действия есть вход changelog-html"
+else
+    bad "у действия нет входа changelog-html — передавать некуда"
+fi
+
+# --------------------------------------------------------------------------
 printf '\n\033[1mитого: %d прошло, %d провалено, %d пропущено\033[0m\n' "$pass" "$fail" "$skipped"
 (( skipped > 0 )) && printf 'пропуски — это не «прошло»: на раннере jq и python есть.\n'
 (( fail == 0 )) || exit 1
