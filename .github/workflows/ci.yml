@@ -198,7 +198,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Версия закреплена тегом релиза, а не веткой main самого actionlint:
+      # раньше скрипт скачивания и сам бинарь ставились с main без пина, то
+      # есть каждый прогон мог получить другую версию линтера без единого
+      # изменения в этом репозитории — придирки или, наоборот, слепые пятна
+      # у actionlint появлялись бы сами по себе, вне контроля CLAUDE.md.
+      # Обновление версии — осознанный шаг, а не побочный эффект чужого релиза.
       - name: actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
         run: |
-          bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          bash <(curl -sSf "https://raw.githubusercontent.com/rhysd/actionlint/v${ACTIONLINT_VERSION}/scripts/download-actionlint.bash") "$ACTIONLINT_VERSION"
           ./actionlint -color
