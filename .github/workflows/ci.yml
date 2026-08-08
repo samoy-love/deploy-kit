@@ -22,9 +22,14 @@ on:
 permissions:
   contents: read
 
+# Устаревший прогон отменяется, как только пришёл следующий пуш в ту же ветку.
+# Без этого пять правок подряд держат пять параллельных прогонов, и первым
+# завершается самый старый — то есть зелёная галочка может относиться к коду,
+# которого уже нет. Для main отмену НЕ включаем: там каждый коммит должен
+# получить свой честный результат, он же попадает в историю.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   # Соглашение из CLAUDE.md, проверяемое машиной.
@@ -36,6 +41,7 @@ jobs:
   commits:
     name: Коммиты без упоминаний ИИ
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
         with:
@@ -164,6 +170,7 @@ jobs:
   nginx:
     name: Конфигурация nginx
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -187,6 +194,7 @@ jobs:
   workflows:
     name: Переиспользуемые workflow
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
