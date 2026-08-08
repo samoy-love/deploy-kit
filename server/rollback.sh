@@ -6,11 +6,24 @@
 #   rollback.sh --app snakes --list                # что вообще есть
 #
 # Пересборка не нужна: релизы лежат на диске рядом, переключается симлинк.
+#
+# --allow-older снимает запрет на движение назад по времени сборки
+# (monotonic_gate в lib.sh). Для отката он включён и без флага — см. ALLOW_OLDER
+# ниже; принимается он потому, что этот флаг называет отказ монотонности в
+# release.sh, и напечатанная там команда обязана работать дословно.
 
 set -Eeuo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 APP=""; ROOT=""; TO=""; UNIT=""; HEALTH=""; NGINX_RELOAD=0; LIST=0
+
+# Откат — это и есть движение назад, поэтому запрет монотонности здесь снят по
+# умолчанию: включить его значило бы запретить единственную операцию, ради
+# которой скрипт существует. Флаг --allow-older ставит то же самое явно —
+# ровно его печатает отказ монотонности в release.sh, и человек в момент аварии
+# копирует ту строку целиком. Неизвестный аргумент уронил бы откат на разборе
+# командной строки — то есть уведомление о неверной выкатке стоило бы прода.
+ALLOW_OLDER=1
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -20,6 +33,7 @@ while [[ $# -gt 0 ]]; do
         --unit)   UNIT="$2"; shift 2 ;;
         --health) HEALTH="$2"; shift 2 ;;
         --nginx-reload) NGINX_RELOAD=1; shift ;;
+        --allow-older)  ALLOW_OLDER=1; shift ;;
         --list)   LIST=1; shift ;;
         *) die "неизвестный аргумент: $1" ;;
     esac
@@ -36,6 +50,31 @@ assert_path_component "--app" "$APP"
 ROOT="$(assert_deploy_root "${ROOT:-/opt/$APP}")" || exit 1
 RELEASES="$ROOT/releases"
 CURRENT="$ROOT/current"
+
+# Событие отката. Обоснование защиты — в шапке notify_event в release.sh:
+# отдельный процесс (замок хоста висит на дескрипторе 9), timeout и гашение
+# любого кода возврата. Здесь ставки те же: откат чинит прод, и уведомление не
+# имеет права его сорвать.
+DK_NOTIFY="${DK_NOTIFY:-}"
+if [[ -z "$DK_NOTIFY" ]]; then
+    _dk_dir="$(dirname "${BASH_SOURCE[0]}")"
+    if   [[ -f "$_dk_dir/notify.sh" ]];        then DK_NOTIFY="$_dk_dir/notify.sh"
+    elif [[ -f "$_dk_dir/../lib/notify.sh" ]]; then DK_NOTIFY="$_dk_dir/../lib/notify.sh"
+    fi
+fi
+
+notify_event() {
+    if [[ ! -f "$DK_NOTIFY" ]]; then
+        log "notify.sh не найден — событие «$*» не отправлено"
+        return 0
+    fi
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 30 bash "$DK_NOTIFY" "$@" </dev/null || warn "событие не отправлено (код $?): $*"
+    else
+        bash "$DK_NOTIFY" "$@" </dev/null || warn "событие не отправлено (код $?): $*"
+    fi
+    return 0
+}
 
 if (( LIST )); then
     echo "релизы $APP (текущий помечен ->):"
@@ -66,6 +105,19 @@ CUR="$(readlink -f "$CURRENT" 2>/dev/null || true)"
 [[ "$TARGET" == "$CUR" ]] && die "уже на этом релизе: $(basename "$TARGET") — выберите другой через --to (посмотрите --list)"
 
 log "откат $APP: $(basename "$CUR") -> $(basename "$TARGET")"
+
+# Тот же барьер, что стоит на пути выкатки (monotonic_gate в lib.sh), но с
+# разрешённым движением назад. Зовётся он и здесь не ради запрета, а ради
+# симметрии и журнала: направление перехода называется вслух одной и той же
+# строкой на обоих путях, и «откат вперёд» (--to на релиз новее живого) виден
+# в логе так же, как движение назад.
+#
+# Живой релиз отдельной переменной: current может не быть вовсе (симлинк снесли
+# руками), и пустое имя обязано доехать до проверки пустым, а не собираться
+# подстановкой, которая в этом случае падает.
+LIVE_RELEASE=""
+[[ -n "$CUR" ]] && LIVE_RELEASE="$(basename "$CUR")"
+monotonic_gate "$(basename "$TARGET")" "$LIVE_RELEASE" "$ALLOW_OLDER"
 [[ -n "$CUR" ]] && switch_symlink "$ROOT/previous" "$CUR"
 switch_symlink "$CURRENT" "$TARGET"
 
@@ -101,6 +153,20 @@ fi
 if [[ -n "$HEALTH" ]]; then
     wait_http "$HEALTH" 10 3 || warn "healthcheck не прошёл ПОСЛЕ отката — состояние требует ручного разбора"
 fi
+
+# Событие уходит независимо от того, полный откат вышел или частичный: симлинк
+# уже переключён, прод уже отдаёт другой релиз — сказать об этом обязаны оба
+# раза. Тем более во втором: неполный откат — это как раз то, о чём в чате надо
+# узнать сразу, а не из графиков.
+#
+# `version` — релиз, НА который вернулись (docs/events.md, §4), `previous` — с
+# которого ушли. Пара читается ровно как строка «была X, стала Y» в сообщении.
+PREV_ARG=()
+if [[ -n "$CUR" ]]; then
+    PREV_ARG=(--previous "$(basename "$CUR")")
+fi
+notify_event --kind rollback --app "$APP" --version "$(basename "$TARGET")" \
+    --reason manual "${PREV_ARG[@]}"
 
 if (( NGINX_OK )); then
     ok "откат выполнен: $APP на $(basename "$TARGET")"

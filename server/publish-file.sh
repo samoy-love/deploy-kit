@@ -32,12 +32,18 @@
 set -Eeuo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-FILE=""; SHA_FILE=""; DEST=""
+FILE=""; SHA_FILE=""; DEST=""; APP=""; VERSION=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --file)   FILE="$2"; shift 2 ;;
         --sha256) SHA_FILE="$2"; shift 2 ;;
         --dest)   DEST="$2"; shift 2 ;;
+        # Цель и версия нужны только событию (docs/events.md): публикация
+        # файла сама по себе о них не знает — она знает про путь. Поэтому
+        # флаги необязательные: старый вызов без них публикует как раньше,
+        # просто молча.
+        --app)     APP="$2"; shift 2 ;;
+        --version) VERSION="$2"; shift 2 ;;
         # Незнакомый флаг — не повод падать: пайплайн обновляется сам
         # (uses: ...@main), а этот скрипт живёт на хосте и отстаёт.
         *) warn "неизвестный аргумент, пропускаю: $1"; shift ;;
@@ -57,6 +63,35 @@ assert_path_component "имя файла в --dest" "$BASE"
 [[ "$DEST" == /* ]] || die "--dest должен быть абсолютным путём, получено «$DEST»"
 DESTDIR="$(assert_deploy_root "$(dirname -- "$DEST")")"
 DEST="$DESTDIR/$BASE"
+
+# --app и --version уезжают в ИМЯ файла события, поэтому проверяются тем же
+# assert_path_component, что и всё, из чего собираются пути.
+[[ -z "$APP" ]]     || assert_path_component "--app" "$APP"
+[[ -z "$VERSION" ]] || assert_path_component "--version" "$VERSION"
+
+# Событие публикации. Обоснование защиты — в шапке notify_event в release.sh:
+# отдельный процесс, timeout, гашение любого кода возврата. Файл здесь уже
+# опубликован, и уведомление не имеет права превратить успех в ошибку.
+DK_NOTIFY="${DK_NOTIFY:-}"
+if [[ -z "$DK_NOTIFY" ]]; then
+    _dk_dir="$(dirname "${BASH_SOURCE[0]}")"
+    if   [[ -f "$_dk_dir/notify.sh" ]];        then DK_NOTIFY="$_dk_dir/notify.sh"
+    elif [[ -f "$_dk_dir/../lib/notify.sh" ]]; then DK_NOTIFY="$_dk_dir/../lib/notify.sh"
+    fi
+fi
+
+notify_event() {
+    if [[ ! -f "$DK_NOTIFY" ]]; then
+        log "notify.sh не найден — событие «$*» не отправлено"
+        return 0
+    fi
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 30 bash "$DK_NOTIFY" "$@" </dev/null || warn "событие не отправлено (код $?): $*"
+    else
+        bash "$DK_NOTIFY" "$@" </dev/null || warn "событие не отправлено (код $?): $*"
+    fi
+    return 0
+}
 
 log "публикую $BASE в $DESTDIR"
 
@@ -131,5 +166,14 @@ SIZE="$(du -h -- "$DEST" | cut -f1)"
 ok "опубликован $DEST ($SIZE)"
 if [[ -f "$DEST.prev" ]]; then
     log "прежняя версия лежит рядом: $DEST.prev (откат: mv поверх основного имени)"
+fi
+
+# Событие — после подмены, когда пользователи уже качают новый файл. Без --app
+# и --version его не собрать: обязательные поля выдумывать нельзя, а имя файла
+# на роль версии не годится — оно у установщика постоянное.
+if [[ -n "$APP" && -n "$VERSION" ]]; then
+    notify_event --kind published --app "$APP" --version "$VERSION"
+else
+    log "без --app и --version событие о публикации не отправляется"
 fi
 exit 0
