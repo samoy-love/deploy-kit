@@ -1,0 +1,19 @@
+{
+  "v": 1,
+  "id": "d209f71003ade058bf845a91031f2cf424fe40567d446ecb689bfb15df32fa91",
+  "kind": "success",
+  "app": "snakes",
+  "at": "2026-08-05T10:01:42Z",
+  "source": "ci",
+  "group": "760e4d55c197922abe742e60a367ad828fb1259b1a3da225a5bbb257d8242ad6",
+  "groupSeq": 2,
+  "version": "release-20260805-130115-1a2b3c4",
+  "previous": "release-20260804-221407-9f8e7d6",
+  "changelog": [
+    "Не выдавать недоставленное уведомление за успех",
+    "Считать пропавший файл ошибкой обновления",
+    "Починить обрыв скачивания больших файлов #21"
+  ],
+  "commitURL": "https://github.com/tr0llex/snakes/commit/1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+  "runURL": "https://github.com/tr0llex/snakes/actions/runs/16542330981/attempts/1"
+}

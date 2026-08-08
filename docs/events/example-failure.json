@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "id": "6de00661e76009ac12a18c7f7a395452e790286cb6756bc7c1be1607c250867d",
+  "kind": "failure",
+  "app": "chillhub-site",
+  "at": "2026-08-05T09:55:00Z",
+  "source": "ci",
+  "group": "ae40809c132b755feaa6a97e123d092ec6a5c3888c8900ae9fd33e4e934dbb48",
+  "groupSeq": 1,
+  "stage": "gates",
+  "commitURL": "https://github.com/tr0llex/chillhub/commit/7f8e9d0c1b2a394857661a2b3c4d5e6f708192a3",
+  "runURL": "https://github.com/tr0llex/chillhub/actions/runs/16542331744/attempts/2"
+}

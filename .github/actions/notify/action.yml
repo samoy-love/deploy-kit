@@ -1,0 +1,308 @@
+name: 'Событие выкатки'
+description: 'Кладёт событие выкатки в журнал на сервере: один голос в чате, один формат, одна реализация доставки'
+
+# Действие типа composite, то есть ШАГ ВНУТРИ job'а выкатки, а не отдельный
+# переиспользуемый workflow. Разница принципиальная, и вся ценность в ней:
+#
+#  * провал ловится только изнутри своей задачи. Шаг с `if: always()` в том же
+#    job'е видит `job.status` и знает, на каком шаге сломалось; отдельный
+#    workflow узнал бы лишь «прогон покраснел» и уже без стадии;
+#  * задача выкатки к этому моменту уже настроила SSH тем же ключом, которым
+#    катит. Второй job поднимал бы второе соединение вторым секретом ради
+#    файла на 700 байт;
+#  * событие обязано родиться там, где произошло, — до того, как раннер
+#    уедет вместе с логом.
+#
+# Своей доставки здесь нет НИ СТРОЧКИ: тело действия — вызов lib/notify.sh из
+# этого же репозитория. Ровно это и есть смысл работы: пять копий bash с
+# токеном Telegram в окружении и сборкой HTML конкатенацией схлопываются в
+# одну реализацию. Появившаяся здесь «маленькая правка на месте» немедленно
+# заводит шестую копию.
+
+inputs:
+  app:
+    description: 'Цель выкатки: то же, что APP в описании цели (snakes, chillhub-site, …)'
+    required: true
+  kind:
+    description: 'Вид события: started | success | failure | rolled_back | rollback | published'
+    required: true
+  version:
+    description: 'Версия, которую выкатывали. У started и failure может отсутствовать'
+    required: false
+    default: ''
+  previous:
+    description: 'Что было на проде до этого'
+    required: false
+    default: ''
+  changelog:
+    description: 'Список изменений: по пункту на строку, простой текст'
+    required: false
+    default: ''
+  commit-url:
+    description: 'Адрес коммита. По умолчанию — коммит, вызвавший прогон'
+    required: false
+    default: ''
+  run-url:
+    description: 'Адрес прогона. По умолчанию — эта попытка этого прогона'
+    required: false
+    default: ''
+  stage:
+    description: 'Стадия провала: gates|preflight|upload|switch|units|health|version|neighbours. Только у failure и rolled_back'
+    required: false
+    default: ''
+  reason:
+    description: 'Причина отката: units_failed|nginx_failed|health_failed|verify_failed|version_mismatch|neighbours_failed|manual. Только у rolled_back и rollback'
+    required: false
+    default: ''
+  notify:
+    description: 'Что цель разрешает говорить: all | fail | never. Берётся из NOTIFY описания цели'
+    required: false
+    default: 'all'
+  ssh-key:
+    description: 'Приватный ключ выкатки (secrets.DEPLOY_SSH_KEY). Тот же, которым идёт сама выкатка'
+    required: false
+    default: ''
+  ssh-host:
+    description: 'Хост журнала событий (secrets.DEPLOY_HOST)'
+    required: false
+    default: ''
+  ssh-user:
+    description: 'Пользователь выкатки (secrets.DEPLOY_USER)'
+    required: false
+    default: ''
+  events-dir:
+    description: 'Каталог журнала на сервере. Пусто — умолчание lib/notify.sh (/var/lib/deploy-kit/events)'
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    # Шаг ОДИН, и это не лень. Ключ выкатки живёт в файле, а composite-действие
+    # не умеет post-шагов (их дают только JS-действия): убрать за собой можно
+    # лишь там же, где создал, — trap'ом в том же процессе. Разложив работу на
+    # три шага, мы получили бы ключ на диске раннера после отменённого прогона.
+    - name: Записать событие выкатки
+      shell: bash
+      env:
+        # Входы приходят ПЕРЕМЕННЫМИ ОКРУЖЕНИЯ, а не подстановкой ${{ }} в тело
+        # скрипта. При подстановке значение становится частью ТЕКСТА скрипта, и
+        # строка вида `x'; curl ...; #` выполняется отдельной командой — с
+        # ключом выкатки под рукой. Через env значение остаётся данными.
+        # Правило то же, что в go-service.yml («Прочитать описание цели»), и
+        # здесь оно строже: сюда приезжают темы коммитов, то есть текст,
+        # который пишет любой с правом на пуш.
+        DK_APP: ${{ inputs.app }}
+        DK_KIND: ${{ inputs.kind }}
+        DK_VERSION: ${{ inputs.version }}
+        DK_PREVIOUS: ${{ inputs.previous }}
+        DK_CHANGELOG: ${{ inputs.changelog }}
+        DK_STAGE: ${{ inputs.stage }}
+        DK_REASON: ${{ inputs.reason }}
+        DK_NOTIFY: ${{ inputs.notify }}
+        DK_EVENTS_DIR: ${{ inputs.events-dir }}
+        DK_SSH_KEY: ${{ inputs.ssh-key }}
+        DK_SSH_HOST: ${{ inputs.ssh-host }}
+        DK_SSH_USER: ${{ inputs.ssh-user }}
+        # Умолчания адресов собираются здесь, а не в теле: у вызывающего их
+        # четыре одинаковых строки на четыре пайплайна, и разъезжаются они
+        # молча. Оба адреса ведут на github.com — единственный хост, который
+        # контракт разрешает (docs/events.md, §4).
+        DK_COMMIT_URL: ${{ inputs.commit-url != '' && inputs.commit-url || format('{0}/{1}/commit/{2}', github.server_url, github.repository, github.sha) }}
+        DK_RUN_URL: ${{ inputs.run-url != '' && inputs.run-url || format('{0}/{1}/actions/runs/{2}/attempts/{3}', github.server_url, github.repository, github.run_id, github.run_attempt) }}
+        # ПРООБРАЗ ГРУППЫ И id (docs/events.md, §5 и §6). Сами хеши считает
+        # lib/notify.sh — второй sha256 здесь означал бы вторую правду о том,
+        # что такое прогон.
+        #
+        # Три величины берутся из контекста GitHub, а не из входов, и это
+        # главное свойство действия. Один пуш выкатывает несколько целей:
+        # у chillhub их шесть, у status.samoy.love три, у double-or-die две.
+        # Коммит и список изменений у них ОДИН, и в чат обязано уйти ОДНО
+        # сообщение на прогон — значит все цели прогона обязаны получить
+        # одинаковый group.
+        #
+        # Они его и получают. Цели разведены по ЗАДАЧАМ ОДНОГО workflow
+        # (chillhub: site → api → admin → admin-ui → installer, каждая
+        # `uses: tr0llex/deploy-kit/...`), а вызов переиспользуемого workflow
+        # не заводит своего прогона: его задачи принадлежат прогону
+        # вызывающего. Поэтому github.run_id и github.run_attempt одинаковы
+        # во всех задачах, а github.repository внутри вызываемого workflow —
+        # это репозиторий ВЫЗЫВАЮЩЕГО, то есть chillhub, а не deploy-kit.
+        # Ровно то, что нужно ключу группы.
+        #
+        # Граница у этого ровно одна, и она честная: цели, разведённые по
+        # РАЗНЫМ workflow одного репозитория, попадут в разные прогоны и в
+        # разные группы — сообщений будет столько же, сколько прогонов. Так
+        # сегодня не устроен ни один проект хозяйства, и устраивать так новые
+        # не следует.
+        #
+        # run_attempt входит в прообраз намеренно: повтор прогона одной
+        # кнопкой — это НОВАЯ выкатка, о ней надо сказать новым сообщением, а
+        # не дописать в позавчерашнее.
+        DK_REPO: ${{ github.repository }}
+        DK_RUN_ID: ${{ github.run_id }}
+        DK_RUN_ATTEMPT: ${{ github.run_attempt }}
+        DK_ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -uo pipefail
+
+        # --- что цель разрешает говорить ---------------------------------
+        #
+        # ПРОВЕРКА notify СТОИТ ПЕРВОЙ — раньше проверки ключа, как это
+        # сделано сегодня в go-service.yml. Порядок наоборот давал бы
+        # предупреждение ни о чём: цель с NOTIFY=never говорить не просили, а
+        # прогон краснел бы жалобой на ненастроенный секрет.
+        #
+        # `never` глушит всё, включая провалы, — это сегодняшняя семантика, и
+        # менять её заодно с транспортом нельзя (открытый вопрос плана:
+        # `never` разумнее глушить только успехи).
+        #
+        # `fail` молчит об успехе. started и published считаются успехом:
+        # первый служебный, второй показывается по правилам цели.
+        case "${DK_NOTIFY:-all}" in
+          all|fail|never) ;;
+          *) echo "::error::notify должен быть all, fail или never, получено: $DK_NOTIFY"; exit 1 ;;
+        esac
+        [ "${DK_NOTIFY:-all}" = "never" ] && exit 0
+        if [ "${DK_NOTIFY:-all}" = "fail" ]; then
+          case "$DK_KIND" in
+            started|success|published) exit 0 ;;
+          esac
+        fi
+
+        # --- проверка входов ----------------------------------------------
+        #
+        # Перечисления проверяются здесь, у источника, а не только в
+        # lib/notify.sh: опечатка в вызывающем workflow иначе доехала бы до
+        # сервера и была бы отвергнута там, где её никто не читает.
+        case "$DK_KIND" in
+          started|success|failure|rolled_back|rollback|published) ;;
+          *) echo "::error::неизвестный kind: $DK_KIND. Допустимо: started, success, failure, rolled_back, rollback, published"; exit 1 ;;
+        esac
+        case "$DK_APP" in
+          '') echo "::error::не задан app — событие не к чему привязать"; exit 1 ;;
+          *[!a-z0-9._-]*|[!a-z0-9]*) echo "::error::app не подходит под ^[a-z0-9][a-z0-9._-]{0,63}$: $DK_APP"; exit 1 ;;
+        esac
+
+        # Контракт (docs/events.md, §4) не просто «не требует» stage у успеха,
+        # а ЗАПРЕЩАЕТ его. Молча выбросить лишнее поле нельзя: раз стадия
+        # задана, кто-то её посчитал, и расхождение между посчитанным и
+        # уехавшим — это дефект, который надо назвать, а не спрятать.
+        case "$DK_KIND" in
+          failure|rolled_back)
+            [ -n "$DK_STAGE" ] || { echo "::error::kind=$DK_KIND без stage: контракт требует стадию"; exit 1 ;} ;;
+          *)
+            [ -z "$DK_STAGE" ] || { echo "::error::stage задан при kind=$DK_KIND — контракт это запрещает"; exit 1 ;} ;;
+        esac
+        case "$DK_KIND" in
+          rolled_back)
+            [ -n "$DK_REASON" ] || { echo "::error::kind=rolled_back без reason: контракт требует причину"; exit 1 ;} ;;
+          rollback)
+            # Ручной откат бывает только одной причины, и подставить её здесь
+            # честнее, чем требовать от каждого вызывающего писать `manual`.
+            DK_REASON="${DK_REASON:-manual}"
+            [ "$DK_REASON" = "manual" ] || { echo "::error::у kind=rollback reason может быть только manual, получено: $DK_REASON"; exit 1 ;} ;;
+          *)
+            [ -z "$DK_REASON" ] || { echo "::error::reason задан при kind=$DK_KIND — контракт это запрещает"; exit 1 ;} ;;
+        esac
+        if [ -n "$DK_STAGE" ]; then
+          case "$DK_STAGE" in
+            gates|preflight|upload|switch|units|health|version|neighbours) ;;
+            *) echo "::error::неизвестная stage: $DK_STAGE. Перечисление закрыто, см. docs/events.md §7"; exit 1 ;;
+          esac
+        fi
+        if [ -n "$DK_REASON" ]; then
+          case "$DK_REASON" in
+            units_failed|nginx_failed|health_failed|verify_failed|version_mismatch|neighbours_failed|manual) ;;
+            *) echo "::error::неизвестная reason: $DK_REASON. Перечисление закрыто, см. docs/events.md §7"; exit 1 ;;
+          esac
+        fi
+
+        # --- ключ ----------------------------------------------------------
+        #
+        # Ненастроенный канал доставки — это ПРЕДУПРЕЖДЕНИЕ, а не провал, и
+        # различие тут выстраданное: пустой секрет молчал ровно так же, как
+        # NOTIFY=never, и «о релизе не сообщили» было неотличимо от «сообщать
+        # не просили» — пять репозиториев из шести годами не слали ни одного
+        # сообщения, и никто не заметил. Теперь ненастроенное видно в логе.
+        # Ронять из-за этого выкатку нельзя: прод к этому моменту уже живой.
+        if [ -z "$DK_SSH_KEY" ] || [ -z "$DK_SSH_HOST" ] || [ -z "$DK_SSH_USER" ]; then
+          echo "::warning::не заданы DEPLOY_SSH_KEY, DEPLOY_HOST или DEPLOY_USER — событие выкатки ($DK_KIND, $DK_APP) никуда не уехало и о выкатке никто не узнал. Задайте секреты либо поставьте NOTIFY=never в описании цели"
+          exit 0
+        fi
+
+        NOTIFY_SH="$DK_ACTION_PATH/../../../lib/notify.sh"
+        if [ ! -f "$NOTIFY_SH" ]; then
+          # Файл приезжает вместе с самим действием: GitHub выкладывает
+          # репозиторий действия на раннер целиком, поэтому lib/notify.sh
+          # берётся из ТОЙ ЖЕ ревизии deploy-kit, что и этот action.yml. Не
+          # скачивается с main отдельным curl — разъехавшиеся половины одного
+          # коммита нам уже стоили одного разбирательства (см. bin/changelog
+          # в go-service.yml).
+          echo "::error::нет $NOTIFY_SH — раскладка deploy-kit не та, что ожидает действие"
+          exit 1
+        fi
+
+        # Каталог с ключом и списком изменений — свой, 0700, и убирается
+        # trap'ом при любом исходе, включая отмену прогона.
+        WORK="$(mktemp -d)"
+        trap 'rm -rf -- "$WORK"' EXIT
+        KEY_FILE="$WORK/deploy_key"
+        # umask до записи, а не chmod после: между созданием файла и chmod
+        # ключ успевает полежать с правами по умолчанию.
+        ( umask 077; printf '%s\n' "$DK_SSH_KEY" > "$KEY_FILE" )
+
+        ARGS=(
+          --source ci
+          --kind "$DK_KIND"
+          --app "$DK_APP"
+          --repo "$DK_REPO"
+          --run-id "$DK_RUN_ID"
+          --run-attempt "$DK_RUN_ATTEMPT"
+          --ssh-key "$KEY_FILE"
+          --ssh-host "$DK_SSH_HOST"
+          --ssh-user "$DK_SSH_USER"
+        )
+        # Необязательное поле ОТСУТСТВУЕТ, а не приезжает пустым (контракт,
+        # §4): "previous": "" читается как «предыдущей версии нет», хотя на
+        # деле её просто не удалось вычислить. Поэтому пустой вход не
+        # превращается в аргумент вовсе.
+        [ -n "$DK_VERSION" ]    && ARGS+=(--version "$DK_VERSION")
+        [ -n "$DK_PREVIOUS" ]   && ARGS+=(--previous "$DK_PREVIOUS")
+        [ -n "$DK_COMMIT_URL" ] && ARGS+=(--commit-url "$DK_COMMIT_URL")
+        [ -n "$DK_RUN_URL" ]    && ARGS+=(--run-url "$DK_RUN_URL")
+        [ -n "$DK_STAGE" ]      && ARGS+=(--stage "$DK_STAGE")
+        [ -n "$DK_REASON" ]     && ARGS+=(--reason "$DK_REASON")
+        [ -n "$DK_EVENTS_DIR" ] && ARGS+=(--events-dir "$DK_EVENTS_DIR")
+
+        # Список изменений едет ФАЙЛОМ, а не аргументом. Темы коммитов
+        # многострочны по построению (пункт на строку), содержат кавычки,
+        # обратные слэши и что угодно ещё; argv на длинных списках упирается
+        # в свой предел, и упирается молча. Файл снимает оба вопроса разом, и
+        # тем же способом список уже возят пайплайны (CHANGELOG_FILE).
+        if [ -n "$DK_CHANGELOG" ]; then
+          printf '%s\n' "$DK_CHANGELOG" > "$WORK/changelog.txt"
+          ARGS+=(--changelog-file "$WORK/changelog.txt")
+        fi
+
+        RC=0
+        bash "$NOTIFY_SH" "${ARGS[@]}" || RC=$?
+        [ "$RC" = "0" ] && exit 0
+
+        # ИСХОД РАЗНЫЙ У started И У ОСТАЛЬНЫХ, и это не непоследовательность.
+        #
+        # started в чат не идёт вовсе (контракт, §4): он кормит детектор
+        # аномалий и метрику времени выкатки. Уронить из-за него ВЫКАТКУ,
+        # которая ещё даже не началась, — это променять прод на служебную
+        # запись. Поэтому здесь предупреждение.
+        #
+        # Всё остальное — красный шаг. Недоставленное событие означает, что о
+        # выкатке (или, хуже, о её провале) не сказали никому, а тишина в чате
+        # читается как «не катились». Ровно этот дефект вся работа и чинит:
+        # выдавать недоставленное уведомление за успех больше нельзя.
+        if [ "$DK_KIND" = "started" ]; then
+          echo "::warning::событие started для $DK_APP не доставлено (код $RC) — выкатка продолжается, но детектор аномалий этого прогона не увидит"
+          exit 0
+        fi
+        echo "::error::событие $DK_KIND для $DK_APP не доставлено (код $RC) — о выкатке никто не узнал"
+        exit "$RC"

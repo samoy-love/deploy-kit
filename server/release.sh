@@ -18,6 +18,13 @@
 #   --no-version-file      цель не раздаёт version.json (WRITE_VERSION_FILE=0),
 #                          сверять по имени релиза в симлинке
 #   --allow-same-version   осознанно разрешить повтор/несравнимую версию
+#
+# Проверка монотонности (см. lib.sh) стоит вплотную к переключению симлинка:
+# каталог нового релиза сравнивается с живым по времени сборки в имени, и
+# выкатка старого релиза поверх нового отвергается — тем же кодом 3 и так же не
+# трогая симлинк. Так ловится повторный запуск давнего прогона, workflow_dispatch
+# на старом ref и задача, отвисевшая в очереди. Своего «разрешить старее» у
+# выкатки нет: осознанное движение назад — это откат (rollback.sh --allow-older).
 
 set -Eeuo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -69,6 +76,51 @@ fi
 
 need_cmd tar; need_cmd curl; need_cmd flock
 
+# --- Событие выкатки ------------------------------------------------------
+#
+# Сборкой и доставкой события занимается notify.sh (docs/events.md); здесь
+# только точки, где о выкатке есть что сказать.
+#
+# ОТПРАВКА СОБЫТИЯ НЕ ИМЕЕТ ПРАВА ВЛИЯТЬ НА ИСХОД. Скрипт идёт под
+# `set -Eeuo pipefail` и спасает прод: падение на строке уведомления означало
+# бы, что уведомление сломало откат. Отсюда три меры разом, и каждая закрывает
+# свой способ этого добиться:
+#
+#   * ОТДЕЛЬНЫЙ ПРОЦЕСС, а не `source`. Замок хоста висит на дескрипторе 9
+#     (acquire_lock в lib.sh), и чужой `exec 9>…`, выполненный в нашем
+#     процессе, снял бы его посреди выкатки. Заодно чужой `exit` остаётся
+#     чужим, а `set -x`, ловушки и переменные не протекают сюда;
+#   * timeout — сеть, недоступный хост журнала или залипший flock не должны
+#     держать откат ни секунды сверх положенного;
+#   * гашение кода возврата — включая 127 «нет такой команды» и 124 от
+#     timeout: несделанное уведомление не превращается в несделанный откат.
+#
+# Вывод при этом НЕ глушится: уехало событие или нет — часть журнала выкатки,
+# и молчание тут читалось бы как «всё хорошо».
+#
+# Путь: на сервере всё хозяйство лежит одной кучей в /opt/deploy-kit, в
+# рабочей копии notify.sh живёт в lib/ — его зовут ещё пайплайн и bin/deploy.
+DK_NOTIFY="${DK_NOTIFY:-}"
+if [[ -z "$DK_NOTIFY" ]]; then
+    _dk_dir="$(dirname "${BASH_SOURCE[0]}")"
+    if   [[ -f "$_dk_dir/notify.sh" ]];        then DK_NOTIFY="$_dk_dir/notify.sh"
+    elif [[ -f "$_dk_dir/../lib/notify.sh" ]]; then DK_NOTIFY="$_dk_dir/../lib/notify.sh"
+    fi
+fi
+
+notify_event() {
+    if [[ ! -f "$DK_NOTIFY" ]]; then
+        log "notify.sh не найден — событие «$*» не отправлено"
+        return 0
+    fi
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 30 bash "$DK_NOTIFY" "$@" </dev/null || warn "событие не отправлено (код $?): $*"
+    else
+        bash "$DK_NOTIFY" "$@" </dev/null || warn "событие не отправлено (код $?): $*"
+    fi
+    return 0
+}
+
 RELEASES="$ROOT/releases"
 CURRENT="$ROOT/current"
 PREVIOUS="$ROOT/previous"
@@ -96,6 +148,23 @@ if (( DRY )); then
     echo "архив:          $ARCHIVE ($(du -h "$ARCHIVE" 2>/dev/null | cut -f1))"
     echo "каталог:        $NEW_DIR"
     echo "текущий релиз:  $([[ -L $CURRENT ]] && basename "$(readlink -f "$CURRENT")" || echo 'нет')"
+    # Монотонность в плане считается по КАТАЛОГАМ релизов, а не по version.json:
+    # именно их сравнивает проверка перед переключением симлинка, и план обязан
+    # показывать то же решение, что примет настоящая выкатка.
+    if [[ -L "$CURRENT" ]]; then
+        DRY_LIVE="$(basename "$(readlink -f "$CURRENT")")"
+        DRY_NEW_TS="$(version_ts "$VERSION" || true)"
+        DRY_LIVE_TS="$(version_ts "$DRY_LIVE" || true)"
+        if [[ "$VERSION" == "$DRY_LIVE" ]]; then
+            echo "монотонность:   пропустит (тот же каталог релиза)"
+        elif [[ -z "$DRY_NEW_TS" || -z "$DRY_LIVE_TS" ]]; then
+            echo "монотонность:   предупредит — время сборки в имени релиза не разбирается"
+        elif (( 10#$DRY_NEW_TS < 10#$DRY_LIVE_TS )); then
+            echo "монотонность:   ОТКАЗ — релиз старше живого $DRY_LIVE"
+        else
+            echo "монотонность:   пропустит (релиз не старше живого)"
+        fi
+    fi
     [[ -n "$UNIT" ]]       && echo "перезапуск:     $UNIT"
     # Каталог релиза ещё не распакован — смотрим прямо в архив.
     #
@@ -171,13 +240,55 @@ ok "релиз распакован"
 # бывшего до текущего, оказывается потеряно ровно в тот момент, когда его
 # труднее всего вспомнить.
 PREV_PREV="$(readlink -f "$PREVIOUS" 2>/dev/null || true)"
+
+# Монотонность: не уводим прод назад по времени сборки (см. monotonic_gate в
+# lib.sh). Живой релиз читается ЗДЕСЬ, а не берётся из PREV_TARGET сверху:
+# смысл проверки — правда о проде за строку до его переключения.
+#
+# Отказ — выход с GATE_REJECT: симлинки не тронуты, прод продолжает работать на
+# живом релизе. Распакованный каталог при этом остаётся лежать среди релизов —
+# он ни на что не влияет (на него не указывает ни один симлинк) и уйдёт при
+# чистке, когда перестанет быть одним из последних KEEP. Стирать его тут же
+# ради чистоты значило бы уничтожать единственное, что человеку останется
+# посмотреть после отказа.
+#
+# Флага «разрешить старее» у выкатки нет намеренно: движение назад — это откат,
+# и у него свой скрипт со своим флагом (rollback.sh --allow-older). Автооткат
+# ниже под запрет не попадает по построению: rollback() зовёт switch_symlink
+# напрямую, а проверка стоит здесь, на пути выкатки, а не внутри switch_symlink.
+LIVE_RELEASE=""
+if [[ -L "$CURRENT" ]]; then
+    LIVE_RELEASE="$(basename "$(readlink -f "$CURRENT")")"
+fi
+monotonic_gate "$VERSION" "$LIVE_RELEASE" 0
+
 [[ -n "$PREV_TARGET" ]] && switch_symlink "$PREVIOUS" "$PREV_TARGET"
 switch_symlink "$CURRENT" "$NEW_DIR"
 ok "current -> $VERSION"
 
+# Имя релиза, который был на проде до нас, — в готовом виде аргументом
+# события. Массив, а не подстановка по месту: пустое значение обязано
+# исчезнуть целиком, а не приехать пустой строкой (docs/events.md, §4:
+# необязательное поле отсутствует, а не приходит пустым).
+PREV_ARG=()
+if [[ -n "$PREV_TARGET" ]]; then
+    PREV_ARG=(--previous "$(basename "$PREV_TARGET")")
+fi
+
+# Автооткат. Аргументы — стадия и причина из закрытых перечислений
+# (docs/events.md, §7): без них откат остаётся ровно таким же невидимым, каким
+# был всегда, — прод чинится сам, а в чате об этом ни слова.
+#
+# Умолчание, а не голые $1/$2: необъявленная переменная под `set -u` убивает
+# шелл целиком, и вызов rollback без аргументов означал бы НЕСДЕЛАННЫЙ откат.
+# Цена ошибки здесь несоизмерима с точностью названия причины.
 rollback() {
+    local stage="${1:-switch}" reason="${2:-}"
     warn "откатываюсь на предыдущий релиз"
     if [[ -z "$PREV_TARGET" ]]; then
+        # Откатываться некуда: прод остался на сломанном релизе. Это failure
+        # со стадией, а не rolled_back, — отката не было.
+        notify_event --kind failure --app "$APP" --stage "$stage"
         die "откатываться некуда: это была первая выкатка $APP. Релиз оставлен как есть, разбирайтесь вручную"
     fi
     switch_symlink "$CURRENT" "$PREV_TARGET"
@@ -194,13 +305,23 @@ rollback() {
     [[ -n "$UNIT" ]] && systemctl restart "$UNIT" || true
     (( NGINX_RELOAD )) && { nginx -t >/dev/null 2>&1 && systemctl reload nginx; } || true
     warn "откат выполнен: current -> $(basename "$PREV_TARGET")"
+    # Событие уходит ПОСЛЕ того, как прод возвращён на место, и ДО die:
+    # сначала чиним, потом рассказываем.
+    if [[ -n "$reason" ]]; then
+        notify_event --kind rolled_back --app "$APP" --version "$VERSION" \
+            --stage "$stage" --reason "$reason" "${PREV_ARG[@]}"
+    else
+        # Причины нет — сочинить значение закрытого перечисления нельзя, и
+        # событие уходит как failure со стадией: рассказ беднее, но не ложный.
+        notify_event --kind failure --app "$APP" --stage "$stage"
+    fi
     die "выкатка $APP $VERSION провалена и откачена"
 }
 
 # --- 2.5. Юниты systemd из релиза ----------------------------------------
 # Сама install_units живёт в lib.sh: её обязан вызывать и ручной откат
 # (rollback.sh), иначе откат чинит половину проблемы.
-install_units "$NEW_DIR" || rollback
+install_units "$NEW_DIR" || rollback units units_failed
 
 # --- 3. Применить ---------------------------------------------------------
 if (( NGINX_RELOAD )); then
@@ -209,22 +330,22 @@ if (( NGINX_RELOAD )); then
         ok "nginx перезагружен"
     else
         nginx -t || true
-        rollback
+        rollback switch nginx_failed
     fi
 fi
 
 if [[ -n "$UNIT" ]]; then
-    systemctl restart "$UNIT" || rollback
+    systemctl restart "$UNIT" || rollback units units_failed
     ok "$UNIT перезапущен"
 fi
 
 # --- 4. Проверить ---------------------------------------------------------
 if [[ -n "$HEALTH" ]]; then
-    wait_http "$HEALTH" 10 3 || rollback
+    wait_http "$HEALTH" 10 3 || rollback health health_failed
 fi
 
 if [[ -n "$VERSION_URL" ]]; then
-    check_version "$VERSION_URL" "$VERSION" || rollback
+    check_version "$VERSION_URL" "$VERSION" || rollback version version_mismatch
 else
     # Цель version.json не раздаёт: подтверждение — имя релиза, на который
     # реально указывает симлинк. Проверка слабее HTTP-сверки (о содержимом
@@ -235,7 +356,7 @@ else
         ok "current указывает на $VERSION"
     else
         warn "current указывает на $LIVE_NOW, а выкатывали $VERSION"
-        rollback
+        rollback version version_mismatch
     fi
 fi
 
@@ -257,15 +378,21 @@ if [[ -f "$NEW_DIR/verify" ]]; then
         ok "проверка цели прошла"
     else
         warn "проверка цели не прошла (или не уложилась в 120 с)"
-        rollback
+        rollback health verify_failed
     fi
 fi
 
 if [[ -n "$NEIGHBOURS" ]]; then
-    check_neighbours ${NEIGHBOURS//,/ } || rollback
+    check_neighbours ${NEIGHBOURS//,/ } || rollback neighbours neighbours_failed
 fi
 
 # --- 5. Прибраться --------------------------------------------------------
 prune_releases "$RELEASES" "$KEEP"
 
 ok "выкатка $APP $VERSION завершена"
+
+# Событие успеха — последней строкой, после ВСЕХ проверок: до неё выкатка ещё
+# может закончиться откатом, и «выкатилось» сказанное раньше времени пришлось
+# бы забирать назад. Чистка старых релизов на исход не влияет и потому стоит
+# выше, а не между проверками и рассказом о них.
+notify_event --kind success --app "$APP" --version "$VERSION" "${PREV_ARG[@]}"

@@ -366,6 +366,103 @@ run "$R" --since HEAD
 expect_rc0; expect_empty
 [[ "$ERR" == *"нечего показывать"* ]] && ok "причина объяснена в stderr" || bad "stderr молчит: $ERR"
 
+# --- --live и --deepen ------------------------------------------------------
+#
+# Диапазон «от живого прода» — та самая правка (агент G3, доп. волна G), ради
+# которой changelog вообще научили считать не от github.event.before. Ниже
+# случаи 4 пунктов шапки файла: ЖИВОЙ ПРОД ПЕРВЫМ (--live сильнее --since и
+# тега), громкий откат при недостижимой ревизии, --deepen для shallow-клона и
+# честный STATUS_FILE — по нему вызывающий узнаёт, каким путём считалось.
+
+case_ "3e. --live выигрывает у --since и у тега — живой прод первым"
+R="$(mkrepo live)"
+commit "$R" "самый первый"
+ROOT="$(git -C "$R" rev-parse HEAD)"
+commit "$R" "до прода"
+LIVE_REV="$(git -C "$R" rev-parse HEAD)"
+gitp "$R" tag v-live
+commit "$R" "после прода один"
+commit "$R" "после прода два"
+run "$R" --live "$LIVE_REV" --since "$ROOT"
+expect_rc0; expect_has "после прода один"; expect_has "после прода два"
+expect_hasnt "до прода"; expect_hasnt "самый первый"
+
+case_ "3f. --live как имя версии deploy-kit (release-ДАТА-sha)"
+SHORT="$(git -C "$R" rev-parse --short "$LIVE_REV")"
+run "$R" --live "release-20260801-$SHORT" --since "$ROOT"
+expect_rc0; expect_has "после прода один"; expect_hasnt "до прода"
+
+case_ "3g. Пустой --live — обычный случай, откат на --since без предупреждения"
+run "$R" --live "" --since "$ROOT"
+expect_rc0; expect_has "до прода"
+[[ "$ERR" != *"коммита прода"* ]] && ok "молчит: пустой --live не повод предупреждать" \
+    || bad "лишнее предупреждение при пустом --live: $ERR"
+
+case_ "3h. --live несуществующей ревизии без --deepen — громкий откат, коммиты не теряются"
+run "$R" --live "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" --since "$ROOT"
+expect_rc0; expect_has "до прода"
+[[ "$ERR" == *"нет в этом клоне"* && "$ERR" == *"НЕ попадут"* ]] \
+    && ok "предупреждение о живом проде звучит громко" || bad "stderr не объясняет откат: $ERR"
+
+case_ "3i. Нехватка истории без --deepen не пытается доуглубляться"
+R="$(mkrepo deepen)"
+commit "$R" "коммит до доуглубления"
+LIVE_REV="$(git -C "$R" rev-parse HEAD)"
+SUBJ=(); for (( i = 1; i <= 5; i++ )); do printf -v s 'после доуглубления %d' "$i"; SUBJ+=("$s"); done
+commits_empty "$R" "${SUBJ[@]}"
+git clone -q --depth 1 "file://$(cd "$R" && pwd)" "$TMP/deepen-shallow" 2>/dev/null
+if [[ -d "$TMP/deepen-shallow" ]]; then
+    [[ "$(git -C "$TMP/deepen-shallow" rev-parse --is-shallow-repository)" == true ]] \
+        && ok "клон для --deepen действительно shallow" || bad "клон не shallow"
+    run "$TMP/deepen-shallow" --live "$LIVE_REV"
+    expect_rc0
+    [[ "$ERR" == *"нет в этом клоне"* ]] && ok "откат на запасной путь произошёл" \
+        || bad "нет объяснения отката: $ERR"
+    [[ "$ERR" != *"доуглубляю"* ]] && ok "без --deepen доуглубление не запускается" \
+        || bad "доуглубление сработало без флага: $ERR"
+else
+    bad "не удалось сделать shallow-клон для --deepen"
+fi
+
+case_ "3j. --deepen дотягивает до ревизии прода в том же shallow-клоне"
+if [[ -d "$TMP/deepen-shallow" ]]; then
+    run "$TMP/deepen-shallow" --live "$LIVE_REV" --deepen
+    expect_rc0; expect_has "после доуглубления 5"; expect_has "после доуглубления 1"
+    expect_hasnt "коммит до доуглубления"
+    [[ "$ERR" == *"доуглубляю историю"* ]] && ok "доуглубление действительно происходило" \
+        || bad "нет следа доуглубления в stderr: $ERR"
+fi
+
+case_ "3k. DK_CHANGELOG_STATUS_FILE — range=live записан при удачном --live"
+R="$(mkrepo statusrepo)"
+commit "$R" "самый первый"
+ROOT="$(git -C "$R" rev-parse HEAD)"
+commit "$R" "до прода"
+LIVE_REV="$(git -C "$R" rev-parse HEAD)"
+commit "$R" "после прода"
+STATUS_LIVE="$TMP/status-live.out"
+DK_CHANGELOG_STATUS_FILE="$STATUS_LIVE" run "$R" --live "$LIVE_REV" --since "$ROOT"
+expect_rc0
+if [[ -f "$STATUS_LIVE" ]]; then
+    grep -q '^range=live$' "$STATUS_LIVE" && ok "статус-файл сообщает range=live" \
+        || bad "range= не live: $(cat "$STATUS_LIVE")"
+    grep -q "^rev=$LIVE_REV\$" "$STATUS_LIVE" && ok "статус-файл называет ревизию прода" \
+        || bad "rev= не совпадает: $(cat "$STATUS_LIVE")"
+else
+    bad "статус-файл не создан"
+fi
+
+case_ "3l. DK_CHANGELOG_STATUS_FILE — range=since записан, когда --live откатился"
+STATUS_FALLBACK="$TMP/status-fallback.out"
+DK_CHANGELOG_STATUS_FILE="$STATUS_FALLBACK" run "$R" --live "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" --since "$ROOT"
+expect_rc0
+if [[ -f "$STATUS_FALLBACK" ]]; then
+    grep -q '^range=since$' "$STATUS_FALLBACK" && ok "статус-файл честно называет запасной путь" \
+        || bad "range= не since: $(cat "$STATUS_FALLBACK")"
+else
+    bad "статус-файл не создан"
+fi
+
 case_ "4. Экранирование HTML и склейка многострочной темы"
 R="$(mkrepo html)"
 commit "$R" "поднять go до 1.22 <-- важно & срочно"

@@ -1,0 +1,18 @@
+{
+  "v": 1,
+  "id": "bd50fb8291b509604f57f43e1183998e64912402952043c103a32fabb0dd1fe4",
+  "kind": "rolled_back",
+  "app": "metro",
+  "at": "2026-08-05T10:20:15Z",
+  "source": "local",
+  "group": "593aeadec622fe57a0cca371105341c9dfeaafb5282fdff081d1d09d1c5b6c11",
+  "groupSeq": 2,
+  "version": "manual-20260805-131944-c4d5e6f",
+  "previous": "manual-20260803-201155-b1a2c3d",
+  "stage": "health",
+  "reason": "health_failed",
+  "changelog": [
+    "Показывать пересадки в ночном расписании"
+  ],
+  "commitURL": "https://github.com/tr0llex/metro-map/commit/c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7"
+}

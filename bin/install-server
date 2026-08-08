@@ -56,7 +56,39 @@ DEPLOY_KEY="${DEPLOY_KEY:-$HOME/.ssh/id_ed25519}"
 SSH=(ssh -i "$DEPLOY_KEY" -o StrictHostKeyChecking=yes "$DEPLOY_USER@$DEPLOY_HOST")
 SCP=(scp -i "$DEPLOY_KEY" -o StrictHostKeyChecking=yes)
 
-FILES=(lib.sh release.sh rollback.sh preflight.sh nginx-apply.sh publish-file.sh)
+# Пути ОТ КОРНЯ репозитория, а не голые имена: notify.sh лежит не в server/, а
+# в lib/ — его зовут ещё пайплайн и bin/deploy, и второй копии у него быть не
+# должно. На сервере же всё хозяйство лежит одной плоской кучей в
+# /opt/deploy-kit: серверные скрипты ищут отправителя событий рядом с собой,
+# каталога lib/ там нет и заводить его ради одного файла незачем.
+FILES=(
+    server/lib.sh
+    server/release.sh
+    server/rollback.sh
+    server/preflight.sh
+    server/nginx-apply.sh
+    server/publish-file.sh
+    lib/notify.sh
+)
+# Имена, под которыми файлы ложатся на сервер. Считаются один раз: ниже они
+# нужны и в цикле сверки, и в удалённой команде разбора синтаксиса.
+NAMES=()
+for f in "${FILES[@]}"; do NAMES+=("$(basename "$f")"); done
+
+# Журнал событий выкатки (docs/events.md, §1 и §11). Пишет деплойный
+# пользователь — тот же, которым идёт выкатка; читают бот и агент, и только на
+# чтение. Каталог намеренно НЕ под /var/www: то, что раздаёт nginx, увезло бы
+# наружу адреса прогонов и стадии провалов.
+EVENTS_DIR="${DK_EVENTS_DIR:-/var/lib/deploy-kit/events}"
+EVENTS_GROUP="${DK_EVENTS_GROUP:-deploy-events}"
+# Кому нужен доступ на чтение. Отсутствующий на хосте пользователь пропускается
+# вслух: список общий на все установки, а бот и агент живут не на каждой.
+EVENTS_READERS="${DK_EVENTS_READERS:-samoylove-bot status}"
+# 3750 = setgid + sticky, владельцу всё, группе r-x, остальным ничего.
+# setgid — чтобы файлы наследовали группу читателей, а не первичную группу
+# писателя. Sticky — чтобы писатель (сегодня один, завтра, возможно, ещё и
+# Alertmanager) не мог удалить или переименовать чужое событие.
+EVENTS_MODE=3750
 
 # Общие сниппеты nginx возит эта же команда, и ровно по той же причине, что и
 # скрипты: у них нет проекта-владельца, а значит нет и пайплайна, который бы
@@ -133,7 +165,7 @@ remote_hash() {
 if [[ "${SKIP_BRANCH_CHECK:-0}" != "1" ]]; then
     git -C "$KIT_DIR" fetch -q origin main 2>/dev/null || true
     CHECK=()
-    for f in "${FILES[@]}";    do CHECK+=("server/$f"); done
+    for f in "${FILES[@]}";    do CHECK+=("$f"); done
     for s in "${SNIPPETS[@]}"; do CHECK+=("nginx/snippets/$s"); done
     for c in "${CONFD[@]}";    do CHECK+=("nginx/conf.d/$c"); done
     for n in "${SITES[@]}";    do CHECK+=("nginx/sites/$n"); done
@@ -153,14 +185,18 @@ fi
 printf '\n%sЧто на сервере %s:%s\n' "$BLD" "$DEST" "$RST"
 drift=()
 for f in "${FILES[@]}"; do
-    lh="$(tr -d '\r' < "$KIT_DIR/server/$f" | sha256sum | cut -c1-12)"
-    rh="$(remote_hash "$DEST/$f")"
+    b="$(basename "$f")"
+    # Проверка явная: под `set -e` отсутствующий файл убил бы скрипт молча, на
+    # перенаправлении внутри подстановки, и понять причину было бы неоткуда.
+    [[ -f "$KIT_DIR/$f" ]] || die "нет $KIT_DIR/$f — выкладывать нечего"
+    lh="$(tr -d '\r' < "$KIT_DIR/$f" | sha256sum | cut -c1-12)"
+    rh="$(remote_hash "$DEST/$b")"
     if [[ -z "$rh" ]]; then
-        printf '  %-16s %sнет на сервере%s\n' "$f" "$YEL" "$RST"; drift+=("$f")
+        printf '  %-16s %sнет на сервере%s\n' "$b" "$YEL" "$RST"; drift+=("$f")
     elif [[ "$lh" == "$rh" ]]; then
-        printf '  %-16s %sсовпадает%s\n' "$f" "$DIM" "$RST"
+        printf '  %-16s %sсовпадает%s\n' "$b" "$DIM" "$RST"
     else
-        printf '  %-16s %sразошлось%s (сервер %s, репозиторий %s)\n' "$f" "$RED" "$RST" "$rh" "$lh"
+        printf '  %-16s %sразошлось%s (сервер %s, репозиторий %s)\n' "$b" "$RED" "$RST" "$rh" "$lh"
         drift+=("$f")
     fi
 done
@@ -226,7 +262,24 @@ if (( WITH_SUDOERS )); then
     fi
 fi
 
-if (( ${#drift[@]} == 0 && ${#sdrift[@]} == 0 && ${#cdrift[@]} == 0 && ${#ndrift[@]} == 0 && sudoers_drift == 0 )); then
+# Каталог событий. Сверяется наравне со скриптами и по той же причине: без него
+# выкатка сообщить о себе не сможет, а узнать об этом было бы неоткуда — событие
+# теряется молча, и всё выглядит ровно как до этой работы.
+printf '\n%sЖурнал событий выкатки %s:%s\n' "$BLD" "$EVENTS_DIR" "$RST"
+events_drift=0
+events_want="$DEPLOY_USER $EVENTS_GROUP $EVENTS_MODE"
+events_got="$("${SSH[@]}" "stat -c '%U %G %a' '$EVENTS_DIR' 2>/dev/null" 2>/dev/null || true)"
+if [[ -z "$events_got" ]]; then
+    printf '  %-34s %sнет на сервере%s\n' "каталог" "$YEL" "$RST"; events_drift=1
+elif [[ "$events_got" == "$events_want" ]]; then
+    printf '  %-34s %sсовпадает%s (%s)\n' "владелец и права" "$DIM" "$RST" "$events_got"
+else
+    printf '  %-34s %sразошлось%s (сервер «%s», нужно «%s»)\n' \
+        "владелец и права" "$RED" "$RST" "$events_got" "$events_want"
+    events_drift=1
+fi
+
+if (( ${#drift[@]} == 0 && ${#sdrift[@]} == 0 && ${#cdrift[@]} == 0 && ${#ndrift[@]} == 0 && sudoers_drift == 0 && events_drift == 0 )); then
     echo; ok "сервер и репозиторий совпадают"
     exit 0
 fi
@@ -238,6 +291,7 @@ if ! (( APPLY )); then
     if (( ${#cdrift[@]} )); then warn "расходятся conf.d: ${cdrift[*]}"; fi
     if (( ${#ndrift[@]} )); then warn "расходятся сайты без владельца: ${ndrift[*]}"; fi
     if (( sudoers_drift  )); then warn "расходится sudoers.d/deploy-kit"; fi
+    if (( events_drift   )); then warn "каталог событий $EVENTS_DIR не заведён или с чужими правами"; fi
     printf '%sВыложить: install-server --apply%s%s\n' "$DIM" \
         "$( (( WITH_SUDOERS )) && printf ' --with-sudoers' )" "$RST"
     exit 1
@@ -252,11 +306,11 @@ if (( ${#drift[@]} )); then
     STAGE="/tmp/deploy-kit-stage-$$"
     "${SSH[@]}" "rm -rf '$STAGE' && mkdir -p '$STAGE'"
     for f in "${FILES[@]}"; do
-        "${SCP[@]}" "$KIT_DIR/server/$f" "$DEPLOY_USER@$DEPLOY_HOST:$STAGE/$f"
+        "${SCP[@]}" "$KIT_DIR/$f" "$DEPLOY_USER@$DEPLOY_HOST:$STAGE/$(basename "$f")"
     done
 
     "${SSH[@]}" "set -e
-        for f in ${FILES[*]}; do
+        for f in ${NAMES[*]}; do
             sed -i 's/\r$//' '$STAGE'/\$f
             bash -n '$STAGE'/\$f || { echo \"\$f не разбирается — ничего не меняю\"; exit 1; }
         done
@@ -269,6 +323,43 @@ if (( ${#drift[@]} )); then
     # сейчас, а не в момент, когда им попытаются что-то выкатить.
     "${SSH[@]}" "sudo $DEST/release.sh --help >/dev/null 2>&1 || sudo bash -n $DEST/release.sh" \
         && ok "release.sh на сервере исполняем"
+fi
+
+# Каталог событий — сразу за скриптами: notify.sh только что лёг рядом с ними и
+# при первой же выкатке начнёт сюда писать. Каталога к этому моменту не быть не
+# должно, иначе первое же событие уйдёт в ошибку.
+#
+# Читатели получают доступ ГРУППОЙ и только на чтение. Читатель, умеющий
+# удалять обработанное, — это читатель, умеющий удалить необработанное; у бота
+# и так лежит токен Telegram, и прав на журнал выкаток он получать не должен.
+# Курсор решает ту же задачу лучше: переживает перезапуск и не портит данные
+# второму читателю.
+#
+# Родитель заводится отдельно и обычным 0755 root:root: `install -d` создаёт
+# недостающие звенья пути с тем же режимом, что и цель, и /var/lib/deploy-kit
+# оказался бы setgid-каталогом деплойного пользователя без всякой на то причины.
+if (( events_drift )); then
+    "${SSH[@]}" "set -e
+        sudo groupadd -f '$EVENTS_GROUP'
+        sudo install -d -o root -g root -m 0755 '$(dirname "$EVENTS_DIR")'
+        sudo install -d -o '$DEPLOY_USER' -g '$EVENTS_GROUP' -m $EVENTS_MODE '$EVENTS_DIR'
+        for u in $EVENTS_READERS; do
+            if id -u \"\$u\" >/dev/null 2>&1; then
+                sudo usermod -aG '$EVENTS_GROUP' \"\$u\"
+            else
+                echo \"читателя \$u на хосте нет — пропускаю\"
+            fi
+        done
+        # Права на уже лежащих событиях: каталог мог существовать до этой
+        # правки, и файлы в нём — с прежним режимом.
+        sudo find '$EVENTS_DIR' -maxdepth 1 -type f -name '*.json' -exec chmod 0640 {} + 2>/dev/null || true" \
+        || die "каталог событий не заведён — выкатка не сможет сообщить о себе"
+    ok "каталог событий: $EVENTS_DIR ($DEPLOY_USER:$EVENTS_GROUP, $EVENTS_MODE)"
+
+    # Членство в группе применяется при следующем входе процесса: у уже
+    # работающих бота и агента её ещё нет.
+    warn "читателям ($EVENTS_READERS) группа выдана — перезапустите их службы,
+   иначе журнал останется для них недоступным до следующего старта"
 fi
 
 # Сниппеты — по одному и через nginx-apply.sh, а не install: сниппет подключён
