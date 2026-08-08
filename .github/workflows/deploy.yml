@@ -69,12 +69,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # Истории нужно на список изменений. fetch-tags — чтобы диапазон
-          # «от прошлого тега» вообще был доступен: при ненулевой глубине теги
-          # иначе не приезжают. Здесь это безопасно, в отличие от go-service:
-          # тегом версию релиза мы не считаем.
+          # История нужна сверке с origin/main (шаг ниже): install-server
+          # отказывается выкладывать невлитое, а на клоне глубиной 1 общего
+          # предка с main просто нет и сравнивать не с чем. 50 — тот же запас
+          # на серию пушей, что и в остальных пайплайнах.
           fetch-depth: 50
-          fetch-tags: true
 
       - name: Завести ссылку origin/main
         # install-server отказывается выкладывать невлитое: он сверяет каждый
@@ -87,6 +86,7 @@ jobs:
         run: echo "version=release-$(date -u +%Y%m%d-%H%M%S)-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Ключи доступа
+        id: ssh
         env:
           KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           HOST_KEY: ${{ secrets.SSH_HOST_KEY }}
@@ -106,6 +106,33 @@ jobs:
             ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
           fi
           chmod 644 ~/.ssh/known_hosts
+
+      # Событие «выкладка началась». В чат само по себе не идёт
+      # (docs/events.md, §4) — оно заводит карточку прогона и даёт детектору
+      # аномалий точку отсчёта. Недоставленное `started` выкладку не роняет:
+      # решение принято внутри действия и там же объяснено.
+      #
+      # Действие берётся ЛОКАЛЬНЫМ путём, а не как tr0llex/deploy-kit@main:
+      # это workflow самого deploy-kit, репозиторий уже выложен checkout'ом, и
+      # ссылка на main означала бы выкладку одной ревизии событием из другой.
+      #
+      # `app` здесь литерал: у deploy-kit нет .deploy-kit/*.env — катится не
+      # сервис с релизами, а набор скриптов, которые живут на хосте. То же имя
+      # стоит в старом сообщении и в bin/install-server.
+      #
+      # Список изменений не передаётся: генератор отдаёт готовый HTML, а вход
+      # `changelog` действия принимает простой текст. Нормализация описана в
+      # docs/events.md §4 и живёт в lib/notify.sh (--changelog-html); второй
+      # нормализатор — второй способ ошибиться.
+      - name: Событие — выкладка началась
+        if: ${{ !inputs.dry-run }}
+        uses: ./.github/actions/notify
+        with:
+          app: deploy-kit
+          kind: started
+          ssh-key: ${{ secrets.DEPLOY_SSH_KEY }}
+          ssh-host: ${{ secrets.DEPLOY_HOST }}
+          ssh-user: ${{ secrets.DEPLOY_USER }}
 
       - name: План выкладки
         # ТОЛЬКО для ручного dry-run, и это не косметика.
@@ -151,6 +178,7 @@ jobs:
           echo "version=$PREV" >> "$GITHUB_OUTPUT"
 
       - name: Выложить
+        id: install
         if: ${{ !inputs.dry-run }}
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
@@ -173,152 +201,59 @@ jobs:
                 'sudo tee /opt/deploy-kit/.version >/dev/null && sudo chmod 0644 /opt/deploy-kit/.version' \
             || echo "::warning::не удалось записать маркер версии — в следующем сообщении не будет строки «была»"
 
-      - name: Уведомить в Telegram
-        if: always() && !inputs.dry-run
+      # СТАДИЯ ПРОВАЛА. Считается по ПЕРВОМУ шагу, который не отработал: шаги
+      # идут по порядку, и всё, что после упавшего, GitHub помечает как
+      # пропущенное. Перечисление закрыто (docs/events.md, §7) — сырой вывод
+      # лога в событие не попадает никогда: в нём бывают пути, хосты и куски
+      # конфигурации, а событие уезжает в чат и на публичную страницу.
+      - name: Стадия провала
+        id: stage
+        if: ${{ always() && job.status != 'success' && !inputs.dry-run }}
         env:
-          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
-          APP: deploy-kit
-          VERSION: ${{ steps.ver.outputs.version }}
-          PREV: ${{ steps.prev.outputs.version }}
-          STATUS: ${{ job.status }}
-          BEFORE: ${{ github.event.before }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          LINK_BASE: ${{ github.server_url }}/${{ github.repository }}
+          O_SSH: ${{ steps.ssh.outcome }}
+          O_PREV: ${{ steps.prev.outcome }}
+          O_INSTALL: ${{ steps.install.outcome }}
         run: |
-          # Пустой секрет молчал бы так же, как «уведомления выключены», и
-          # «о выкладке не сообщили» было бы неотличимо от «сообщать не
-          # просили». Именно из-за такой тишины пять репозиториев из шести
-          # годами не слали ни одного сообщения, и никто не заметил.
-          if [ -z "$TOKEN" ] || [ -z "$CHAT" ]; then
-            echo "::warning::TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID не заданы в секретах репозитория — о выкладке никто не узнал"
-            exit 0
-          fi
-
-          # Генератор лежит в этом же репозитории — качать его с raw, как это
-          # делают переиспользуемые workflow, здесь незачем. Через bash: в
-          # индексе bin/* лежат как 100644, бита исполнения нет ни у одного.
-          CHANGES=""
-          if [ "$STATUS" = "success" ]; then
-            CHANGES="$(bash bin/changelog --repo "$GITHUB_WORKSPACE" --since "${BEFORE:-}" --all \
-                         --link-base "$LINK_BASE" || true)"
-            # Форма сообщения — та же, что у бота статуса (samoy-status,
-            # bot/format.go, KindRelease). Лента релизов в чате одна на всё
-            # хозяйство, и выкладка deploy-kit, оформленная по-своему, читалась
-            # бы как событие другой природы. Порядок строк тот же: что
-            # обновилось и куда ведёт, версия ссылкой на коммит, прошлая
-            # версия, время сборки, и список изменений последним блоком через
-            # пустую строку.
-            #
-            # Версия — ССЫЛКА НА КОММИТ, а не <code>: связь «коммит → выкатка»
-            # только этой ссылкой в сообщении и выражена. Ровно так делает
-            # versionHTML в боте.
-            TEXT=$(printf '🚀 <b><a href="%s">Deploy Kit · Серверная часть</a></b> обновлён\n<a href="%s/commit/%s">%s</a>' \
-                     "$LINK_BASE" "$LINK_BASE" "$GITHUB_SHA" "$VERSION")
-            [ -n "$PREV" ] && TEXT=$(printf '%s\nбыла <code>%s</code>' "$TEXT" "$PREV")
-            # Время сборки в MSK — как у бота (fmtTime: «02.01 15:04 MSK»).
-            TEXT=$(printf '%s\n<i>собрано %s</i>' "$TEXT" "$(TZ=Europe/Moscow date '+%d.%m %H:%M MSK')")
-          else
-            TEXT=$(printf '💥 <b><a href="%s">Deploy Kit · Серверная часть</a></b> — выкладка провалена\n<a href="%s/commit/%s">%s</a>\n<a href="%s">лог прогона</a>' \
-                     "$LINK_BASE" "$LINK_BASE" "$GITHUB_SHA" "$VERSION" "$RUN_URL")
-          fi
-
-          # Список — ПОСЛЕДНИМ блоком. Генератор отдаёт готовый фрагмент HTML
-          # со своим заголовком и уже экранированный: повторно не экранируем,
-          # в <pre> не заворачиваем, свой заголовок не дописываем.
-          # Через ПУСТУЮ строку, как у бота: список самый длинный, самый
-          # необязательный и единственный, которого может не быть, а всё, ради
-          # чего сообщение читают в первую очередь, остаётся выше и на месте.
-          if [ -n "$CHANGES" ]; then
-            TEXT=$(printf '%s\n\n%s' "$TEXT" "$CHANGES")
-          fi
-
-          # --- отправка: одним сообщением или несколькими подряд ------------
+          # Порядок пар — порядок шагов. Пустой outcome значит «до шага не
+          # дошло», skipped — «пропущен по своему if», и ни то ни другое
+          # стадией не является.
           #
-          # Предел Telegram — 4096 единиц UTF-16 НА СООБЩЕНИЕ, и он жёсткий:
-          # текст длиннее API не режет, а ОТВЕРГАЕТ целиком. С --all потолка у
-          # списка нет, поэтому обязанность уложиться в предел лежит здесь.
-          # Режем ТОЛЬКО по границам строк: в строке стоит <a href="…">#21</a>,
-          # и рез посреди неё порвал бы тег, а невалидная разметка — снова
-          # отказ API, то есть потерянная часть.
-          LIMIT=4096
-          BUDGET=$(( LIMIT - 160 ))
-
-          if command -v jq >/dev/null 2>&1; then
-            # Считаем тем же счётом, что и Telegram, — в единицах UTF-16:
-            # символ вне BMP (эмодзи в шапке) занимает ДВЕ единицы.
-            line_len() { jq -Rrn 'inputs | ([explode[] | if . > 65535 then 2 else 1 end] | add // 0)'; }
-          else
-            # Без jq считаем байтами. В UTF-8 байтов всегда не меньше, чем
-            # единиц UTF-16, поэтому оценка идёт В ЗАПАС: сообщений выйдет
-            # больше необходимого, но длиннее предела — ни одного.
-            line_len() { LC_ALL=C awk '{ print length($0) }'; }
-          fi
-
-          mapfile -t MSG_LINES <<< "$TEXT"
-          # tr -d '\r': вывод с CRLF дал бы «27\r», а для (( … )) это не число,
-          # но ошибка ТИХАЯ — условие просто ложно, и упаковка рассыпается на
-          # «по сообщению на строку».
-          mapfile -t MSG_LENS < <(printf '%s\n' "$TEXT" | line_len | tr -d '\r')
-
-          MEASURED=1
-          if (( ${#MSG_LENS[@]} != ${#MSG_LINES[@]} )); then
-            MEASURED=0
-          else
-            for n in "${MSG_LENS[@]}"; do
-              case "$n" in ''|*[!0-9]*) MEASURED=0; break ;; esac
-            done
-          fi
-
-          PARTS=()
-          if (( MEASURED == 0 )); then
-            echo "::warning::не удалось измерить сообщение — отправляю одним куском"
-            PARTS=("$TEXT")
-          else
-            cur=""; curlen=0; started=0
-            for i in "${!MSG_LINES[@]}"; do
-              l="${MSG_LINES[i]}"; n="${MSG_LENS[i]}"
-              if (( started == 0 )); then
-                cur="$l"; curlen=$n; started=1
-              elif (( curlen + 1 + n <= BUDGET )); then
-                cur="$cur"$'\n'"$l"; curlen=$(( curlen + 1 + n ))
-              else
-                PARTS+=("$cur"); cur="$l"; curlen=$n
-              fi
-            done
-            if (( started )); then PARTS+=("$cur"); fi
-          fi
-
-          TOTAL_PARTS=${#PARTS[@]}
-          PART_NO=0
-          for part in "${PARTS[@]}"; do
-            PART_NO=$(( PART_NO + 1 ))
-            if (( TOTAL_PARTS > 1 )); then
-              if (( PART_NO == 1 )); then
-                part="$part"$'\n'"<i>часть 1 из $TOTAL_PARTS — продолжение ниже</i>"
-              else
-                part="<b>$APP</b> — часть $PART_NO из $TOTAL_PARTS"$'\n'"$part"
-              fi
-            fi
-            # Ответ API РАЗБИРАЕТСЯ, а не выбрасывается: отвергнутое сообщение
-            # ничем иначе от отправленного не отличается — ни кодом curl, ни
-            # логом. В лог уходит только НОМЕР части: в теле ответа Telegram
-            # возвращает эхом chat_id, а это секрет.
-            RESP="$(curl -s -X POST "https://api.telegram.org/bot$TOKEN/sendMessage" \
-              -d chat_id="$CHAT" -d parse_mode=HTML -d disable_web_page_preview=true \
-              --data-urlencode "text=$part" || true)"
-            # На первой же неудаче отправка прекращается: «1 из 3» и сразу
-            # «3 из 3» читается как «всё пришло». Правило то же, что в
-            # bin/deploy и в переиспользуемых workflow.
-            case "$RESP" in
-              *'"ok":true'*) ;;
-              *)
-                echo "::warning::Telegram не принял часть $PART_NO из $TOTAL_PARTS — уведомление дошло не полностью."
-                echo "::warning::Отправлено частей: $(( PART_NO - 1 )) из $TOTAL_PARTS, остальные не отправлялись."
-                break
-                ;;
+          # install-server кладёт файлы в /opt/deploy-kit и /etc/nginx и
+          # перезагружает nginx — это switch, та же стадия, что переключение
+          # симлинка у остальных архетипов.
+          STAGE=""
+          for pair in "$O_SSH:upload" "$O_PREV:preflight" "$O_INSTALL:switch"; do
+            case "${pair%%:*}" in
+              ''|success|skipped) continue ;;
             esac
+            STAGE="${pair#*:}"
+            break
           done
+          # Ни один известный шаг не покраснел — упало что-то до них (checkout,
+          # ссылка origin/main) или прогон отменили. Стадия у failure
+          # обязательна, а значения «неизвестно» в закрытом перечислении нет:
+          # preflight — самое раннее из возможных и потому наименее лживое.
+          [ -n "$STAGE" ] || STAGE=preflight
+          echo "stage=$STAGE" >> "$GITHUB_OUTPUT"
+          echo "Стадия провала: $STAGE"
+
+      # ИСХОД — ОДНИМ шагом под always(). Два шага (успех и провал) со
+      # взаимоисключающими условиями дали бы два места, где считается вид
+      # события, и рано или поздно они разошлись бы.
+      - name: Событие — исход выкладки
+        if: ${{ always() && !inputs.dry-run }}
+        uses: ./.github/actions/notify
+        with:
+          app: deploy-kit
+          kind: ${{ job.status == 'success' && 'success' || 'failure' }}
+          version: ${{ steps.ver.outputs.version }}
+          previous: ${{ steps.prev.outputs.version }}
+          # Стадия — только у провала: у успеха контракт её ЗАПРЕЩАЕТ, и
+          # действие на непустую стадию при kind=success ответит ошибкой.
+          stage: ${{ job.status == 'success' && '' || steps.stage.outputs.stage }}
+          ssh-key: ${{ secrets.DEPLOY_SSH_KEY }}
+          ssh-host: ${{ secrets.DEPLOY_HOST }}
+          ssh-user: ${{ secrets.DEPLOY_USER }}
 
       - name: Убрать ключ
         if: always()

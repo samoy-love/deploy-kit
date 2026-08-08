@@ -78,6 +78,27 @@ on:
 permissions:
   contents: read
 
+# Блока не было вовсе, то есть два прогона шли параллельно до конца. Публикация
+# здесь — подмена ОДНОГО файла на сервере (PUBLISH_DEST) и его .sha256 рядом:
+# два прогона наперегонки кладут туда разные сборки, и «Сверить с прода» у
+# обоих сравнивает свою сумму с чужим файлом — либо красный прогон при
+# выложенном установщике, либо зелёный при чужой версии на кнопке «Скачать».
+# Канал самообновления страдает так же: манифест строится по тому ZIP, который
+# приехал последним.
+#
+# Ключ такой же, как в static-site.yml: репозиторий плюс ЦЕЛЬ, потому что
+# разные цели одного репозитория публикуются в разные места и гонки между
+# собой не имеют. К цели приклеен upload-dest — по той же причине, по которой
+# в rollback.yml к config приклеен app: у проверочных сборок описания цели нет,
+# и без второй половины все они попали бы в одну группу «пустая цель» и ждали
+# бы друг друга без повода.
+#
+# cancel-in-progress: false — очередь, а не отмена: прогон, отменённый между
+# scp и publish-file.sh, оставляет на сервере установщик без свежей суммы.
+concurrency:
+  group: deploy-${{ github.repository }}-${{ inputs.config }}${{ inputs.upload-dest }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: windows-latest
@@ -86,14 +107,15 @@ jobs:
     # описания цели уже не видит: файл лежит в репозитории проекта, а читает
     # его шаг «Прочитать описание цели» здесь.
     outputs:
-      app: ${{ steps.cfg.outputs.app }}
-      title: ${{ steps.cfg.outputs.title }}
-      home: ${{ steps.cfg.outputs.home }}
+      event_app: ${{ steps.cfg.outputs.event_app }}
       version: ${{ steps.ver.outputs.version }}
       notify: ${{ steps.cfg.outputs.notify }}
       upload_dest: ${{ steps.cfg.outputs.upload_dest }}
-      verify_url: ${{ steps.cfg.outputs.verify_url }}
-      selfupdate_url: ${{ steps.cfg.outputs.selfupdate_url }}
+      # Стадия провала уезжает из job'а сборки наружу, потому что событие об
+      # исходе отправляет СОСЕДНИЙ job (см. его шапку — он на ubuntu, и это
+      # вынужденно). Контекст steps соседу недоступен, а стадию знает только
+      # тот, кто эти шаги выполнял.
+      stage: ${{ steps.stage.outputs.stage }}
     steps:
       - uses: actions/checkout@v7
 
@@ -154,6 +176,14 @@ jobs:
           BUILD_PWSH=""; [ -z "$CONFIG" ] && BUILD_PWSH="$IN_BUILD"
           {
             echo "app=${APP:-установщик}"
+            # ОТДЕЛЬНЫЙ ВЫХОД ДЛЯ СОБЫТИЯ ВЫКАТКИ, и он не дубликат `app`.
+            # Умолчание выше — «установщик»: слово для чата, а `app` в событии
+            # попадает в ИМЯ ФАЙЛА журнала и подчиняется
+            # ^[a-z0-9][a-z0-9._-]{0,63}$ (docs/events.md, §4). Кириллица под
+            # него не подходит, и событие было бы отвергнуто у источника.
+            # Пусто значит «цель не названа» — это проверочная сборка без
+            # описания цели, и события у неё нет: называть в журнале нечего.
+            echo "event_app=${APP:-}"
             # Имя для чата. APP — техническое имя цели (chillhub-installer), и
             # в ленте релизов, где у соседей стоит «Лаунчер · Сайт», оно
             # читается как строка из лога, а не как событие хозяйства. TITLE
@@ -225,17 +255,72 @@ jobs:
       # может выполниться как отдельная команда. Здесь это важнее, чем в
       # соседних пайплайнах: в окружении job'а — ключ выкатки и учётка админки.
       - name: Проверки
+        id: gates
         if: inputs.gates != ''
         shell: pwsh
         env:
           GATES: ${{ inputs.gates }}
         run: Invoke-Expression $env:GATES
 
+      # SSH НАСТРАИВАЕТСЯ ДО СБОРКИ, а не перед публикацией, и переехал он
+      # сюда вместе с событиями выкатки. Событие «выкатка началась» уходит на
+      # тот же хост тем же ключом, и уйти оно обязано до проверок и сборки:
+      # `started` кормит детектор аномалий («началась и не кончилась») и
+      # заводит карточку прогона, в которую потом дописываются исходы целей.
+      # Сборка установщика идёт десятками минут — карточка, появляющаяся
+      # только к её концу, теряет ровно то, ради чего события затевались.
+      #
+      # Условие прежнее: без PUBLISH_DEST публиковать некуда, это проверочная
+      # сборка, и ни ключ, ни событие ей не нужны.
+      - name: Настроить SSH
+        id: ssh
+        if: steps.cfg.outputs.upload_dest != ''
+        shell: bash
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST_KEY: ${{ secrets.SSH_HOST_KEY }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          # НЕ `install -m 700 -d`, как в static-site.yml: раннер здесь
+          # windows, каталог ~/.ssh уже существует, а сменить права на нём
+          # Git Bash не может — ACL профиля не его: «cannot change
+          # permissions … Permission denied», и публикация падала ещё до
+          # первого байта. ssh от Git for Windows строгие права требует
+          # только от самого ключа, каталогу достаточно существовать.
+          mkdir -p ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # Ключ хоста из секрета, а не ssh-keyscan: keyscan доверяет первому
+          # ответу и молча принимает подмену.
+          if [ -n "$HOST_KEY" ]; then
+            printf '%s\n' "$HOST_KEY" > ~/.ssh/known_hosts
+          else
+            echo "::warning::SSH_HOST_KEY не задан — ключ хоста принимается доверием к первому ответу"
+            ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          fi
+          chmod 644 ~/.ssh/known_hosts
+
+      # Событие «выкатка началась». Само по себе в чат не идёт (docs/events.md,
+      # §4) — заводит карточку прогона и даёт детектору аномалий точку отсчёта.
+      # Недоставленное `started` сборку не роняет: решение принято внутри
+      # действия и там же объяснено.
+      - name: Событие — выкатка началась
+        if: steps.cfg.outputs.upload_dest != '' && steps.cfg.outputs.event_app != ''
+        uses: tr0llex/deploy-kit/.github/actions/notify@main
+        with:
+          app: ${{ steps.cfg.outputs.event_app }}
+          kind: started
+          notify: ${{ steps.cfg.outputs.notify }}
+          ssh-key: ${{ secrets.DEPLOY_SSH_KEY }}
+          ssh-host: ${{ secrets.DEPLOY_HOST }}
+          ssh-user: ${{ secrets.DEPLOY_USER }}
+
       # Сборка — двумя взаимоисключающими шагами: BUILD_CMD из описания цели —
       # bash-строка (та же, что выполняет dk deploy, PowerShell в ней зовётся
       # явно), вход build — PowerShell, прежний контракт проверочных сборок.
       # Заполнен всегда ровно один выход — см. шаг «Прочитать описание цели».
       - name: Собрать установщик
+        id: build
         if: steps.cfg.outputs.build_bash != ''
         shell: bash
         env:
@@ -244,6 +329,7 @@ jobs:
         run: eval "$BUILD"
 
       - name: Собрать установщик (PowerShell)
+        id: build_pwsh
         if: steps.cfg.outputs.build_pwsh != ''
         shell: pwsh
         env:
@@ -293,37 +379,11 @@ jobs:
       # Git for Windows несёт свои ssh и scp, и ~/.ssh в нём разворачивается
       # в профиль раннера — известные хосты и ключ читаются оттуда же, откуда
       # их читает ssh.
-      - name: Настроить SSH
-        if: steps.cfg.outputs.upload_dest != ''
-        shell: bash
-        env:
-          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          HOST_KEY: ${{ secrets.SSH_HOST_KEY }}
-          HOST: ${{ secrets.DEPLOY_HOST }}
-        run: |
-          # НЕ `install -m 700 -d`, как в static-site.yml: раннер здесь
-          # windows, каталог ~/.ssh уже существует, а сменить права на нём
-          # Git Bash не может — ACL профиля не его: «cannot change
-          # permissions … Permission denied», и публикация падала ещё до
-          # первого байта. ssh от Git for Windows строгие права требует
-          # только от самого ключа, каталогу достаточно существовать.
-          mkdir -p ~/.ssh
-          printf '%s\n' "$KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          # Ключ хоста из секрета, а не ssh-keyscan: keyscan доверяет первому
-          # ответу и молча принимает подмену.
-          if [ -n "$HOST_KEY" ]; then
-            printf '%s\n' "$HOST_KEY" > ~/.ssh/known_hosts
-          else
-            echo "::warning::SSH_HOST_KEY не задан — ключ хоста принимается доверием к первому ответу"
-            ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
-          fi
-          chmod 644 ~/.ssh/known_hosts
-
       # Каталог на сервере — приватный от mktemp, по тем же соображениям, что
       # в шаге «Выкатить» static-site.yml: файл читает publish-file.sh под
       # sudo, и между scp и установкой не должно быть окна для подмены.
       - name: Выложить на сервер
+        id: upload
         if: steps.cfg.outputs.upload_dest != ''
         shell: bash
         env:
@@ -349,6 +409,7 @@ jobs:
       # посчитанная на раннере, сверяется с той, что РАЗДАЁТ прод. Это тот же
       # смысл, что сверка /version.json после выкатки сайта.
       - name: Сверить с прода
+        id: verify
         if: steps.cfg.outputs.upload_dest != '' && steps.cfg.outputs.verify_url != ''
         shell: bash
         env:
@@ -377,6 +438,7 @@ jobs:
       # подменён, и молча оставить манифест несобранным значит разъехаться
       # с ним до следующего релиза.
       - name: Загрузить сборку самообновления
+        id: selfupdate
         if: steps.cfg.outputs.selfupdate_url != ''
         shell: bash
         env:
@@ -393,264 +455,135 @@ jobs:
           [ -s /tmp/selfupdate-upload ] || { echo "::error::bin/selfupdate-upload скачался пустым"; exit 1; }
           bash /tmp/selfupdate-upload --url "$SELFUPDATE_URL" --zip "$SELFUPDATE_ZIP" --version "$VERSION"
 
+      # СТАДИЯ ПРОВАЛА. Считается по ПЕРВОМУ шагу, который не отработал: шаги
+      # идут по порядку, и всё, что после упавшего, GitHub помечает как
+      # пропущенное. Перечисление закрыто (docs/events.md, §7) — сырой вывод
+      # лога в событие не попадает никогда: в нём бывают пути, хосты и куски
+      # конфигурации, а событие уезжает в чат и на публичную страницу.
+      #
+      # Шаг стоит ДО «Убрать ключ» и под always(), потому что иначе он не
+      # выполнился бы ровно тогда, когда только и нужен, — на красном прогоне.
+      - name: Стадия провала
+        id: stage
+        if: always() && job.status != 'success'
+        shell: bash
+        env:
+          O_CFG: ${{ steps.cfg.outcome }}
+          O_VER: ${{ steps.ver.outcome }}
+          O_SSH: ${{ steps.ssh.outcome }}
+          O_GATES: ${{ steps.gates.outcome }}
+          O_BUILD: ${{ steps.build.outcome }}
+          O_BUILD_PWSH: ${{ steps.build_pwsh.outcome }}
+          O_SUM: ${{ steps.sum.outcome }}
+          O_UPLOAD: ${{ steps.upload.outcome }}
+          O_VERIFY: ${{ steps.verify.outcome }}
+          O_SELFUPDATE: ${{ steps.selfupdate.outcome }}
+        run: |
+          # Порядок пар — порядок шагов. Пустой outcome значит «до шага не
+          # дошло», skipped — «пропущен по своему if», и ни то ни другое
+          # стадией не является.
+          #
+          # «Сверить с прода» — это version: сумма, посчитанная на раннере,
+          # сверяется с той, что РАЗДАЁТ прод, то есть ровно та же проверка,
+          # что сверка /version.json у остальных архетипов, только маркер
+          # другой. Публикация сборки самообновления — второй канал доставки,
+          # отсюда upload.
+          STAGE=""
+          for pair in \
+              "$O_CFG:preflight" "$O_VER:preflight" "$O_SSH:upload" \
+              "$O_GATES:gates" \
+              "$O_BUILD:preflight" "$O_BUILD_PWSH:preflight" "$O_SUM:preflight" \
+              "$O_UPLOAD:upload" "$O_VERIFY:version" "$O_SELFUPDATE:upload"; do
+            case "${pair%%:*}" in
+              ''|success|skipped) continue ;;
+            esac
+            STAGE="${pair#*:}"
+            break
+          done
+          # Ни один известный шаг не покраснел — упало что-то до них (checkout,
+          # сам раннер) или прогон отменили. Стадия у failure обязательна, а
+          # значения «неизвестно» в закрытом перечислении нет: preflight —
+          # самое раннее из возможных и потому наименее лживое.
+          [ -n "$STAGE" ] || STAGE=preflight
+          echo "stage=$STAGE" >> "$GITHUB_OUTPUT"
+          echo "Стадия провала: $STAGE"
+
       - name: Убрать ключ
         if: always() && steps.cfg.outputs.upload_dest != ''
         shell: bash
         run: rm -f ~/.ssh/deploy_key
 
-  # Публикация на сервер объявляет результат в Telegram, как и остальные пути
-  # выкатки: невыкаченное, о котором не сказали, выглядит как выкаченное.
+  # Публикация на сервер объявляет результат событием выкатки, как и остальные
+  # пути: невыкаченное, о котором не сказали, выглядит как выкаченное.
   #
   # ОТДЕЛЬНЫМ JOB'ОМ И НА UBUNTU — не ради красоты структуры.
   #
-  # Шагом сборки это уезжало в чат строкой «?? chillhub-installer ???????????».
-  # Раннер сборки windows, bash там от Git for Windows, и аргументы НАТИВНОМУ
-  # curl.exe он перекодирует в системную кодовую страницу (CP1252), где ни
-  # кириллице, ни эмодзи соответствия нет: каждый символ становится «?», а
-  # эмодзи — двумя, по суррогатной паре. В логе прогона при этом всё читается:
-  # echo не выходит за пределы bash, argv не проходит, — поэтому дефект был
-  # виден только в чате и только получателю.
+  # Раннер сборки windows, bash там от Git for Windows, и аргументы НАТИВНЫМ
+  # программам (ssh.exe, curl.exe) он перекодирует в системную кодовую
+  # страницу (CP1252), где ни кириллице, ни эмодзи соответствия нет: каждый
+  # символ становится «?», а эмодзи — двумя, по суррогатной паре. Уведомление
+  # об установщике так однажды и уехало в чат строкой
+  # «?? chillhub-installer ???????????», причём в логе прогона всё читалось:
+  # echo не выходит за пределы bash, argv не проходит, — дефект был виден
+  # только получателю. Событие выкатки едет по SSH теми же аргументами и
+  # подставилось бы ровно под ту же перекодировку.
   #
   # Вылечить это на месте нечем: перекодировка живёт между bash и любым
-  # нативным exe, а curl на раннере нативный. Здесь же, на ubuntu, сообщение
-  # собирается и уходит ровно так же, как у остальных архетипов, — тем же
-  # кодом, теми же строками.
+  # нативным exe. Здесь, на ubuntu, событие собирается и уходит тем же
+  # lib/notify.sh, что у остальных архетипов.
   #
-  # Форма сообщения — та же, что у бота статуса (samoy-status, bot/format.go,
-  # KindRelease) и у deploy.yml: лента релизов в чате одна на всё хозяйство, и
-  # установщик, оформленный по-своему, читался бы как событие другой природы.
-  # Строки «была …» здесь нет: цель-файл не хранит на сервере версию — она не
-  # едет релизным каталогом, и предыдущую взять неоткуда.
+  # Репозиторий этому job'у не нужен и не выкачивается: всё, что он говорит,
+  # приходит выходами job'а сборки, а доставку делает действие из deploy-kit.
   notify:
     needs: build
     if: always() && needs.build.outputs.upload_dest != ''
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      # Глубина — ради списка изменений: по умолчанию checkout привозит один
-      # коммит, и генератор честно покажет ровно один пункт. Причина та же, что
-      # в static-site.yml, где это расписано подробно.
+      # Ключ хоста нужен и здесь: доставка события идёт по SSH со СВОИМ
+      # StrictHostKeyChecking=yes (lib/notify.sh), а этот job — отдельный
+      # раннер, у которого ~/.ssh пуст. Приватный ключ шагу не нужен: его
+      # действие получает входом и держит во временном файле само.
+      - name: Настроить SSH
+        env:
+          HOST_KEY: ${{ secrets.SSH_HOST_KEY }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          install -m 700 -d ~/.ssh
+          if [ -n "$HOST_KEY" ]; then
+            printf '%s\n' "$HOST_KEY" > ~/.ssh/known_hosts
+          else
+            echo "::warning::SSH_HOST_KEY не задан — ключ хоста принимается доверием к первому ответу"
+            ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          fi
+          chmod 644 ~/.ssh/known_hosts
+
+      # ИСХОД — ОДНИМ шагом. Вид события считается в одном месте: два шага со
+      # взаимоисключающими условиями рано или поздно разошлись бы.
       #
-      # ТЕГИ НЕ КАЧАЕМ, и это не экономия. У генератора есть запасной вариант
-      # «от последнего тега», и у статики он безобиден: тегов в тех
-      # репозиториях нет вовсе. Здесь теги ЕСТЬ — ими помечены версии
-      # приложения, а не публикации установщика, и последний из них отстаёт на
-      # сколько угодно релизов: v1.2.3 при выкаченной 1.3.0. Прогон без точки
-      # отсчёта (workflow_dispatch) хватался за этот тег и увозил в чат
-      # «показано 30 из 32» — полгода чужой истории вместо изменений релиза.
-      # Без тегов у генератора остаётся запасной вариант с жёстким потолком в
-      # восемь коммитов, а на пуше диапазон и так приходит готовым.
-      - uses: actions/checkout@v7
+      # Вид успеха — success, а НЕ published, хотя публикуется файл. Причина
+      # в читателе: `published` контракт (§12) показывает «по правилам цели»,
+      # а `success` — всегда и той же карточкой, что у остальных архетипов.
+      # Установщик в ленте релизов — такое же событие хозяйства, как выкатка
+      # сайта, и оформленный иначе он читался бы как событие другой природы.
+      # `published` остаётся за publish-file.sh, куда приходит локальная
+      # выкатка `dk deploy`.
+      #
+      # Список изменений сюда не передаётся: генератор отдаёт готовый HTML, а
+      # вход `changelog` действия принимает простой текст. Нормализация
+      # описана в docs/events.md §4 и живёт в lib/notify.sh (--changelog-html);
+      # заводить здесь второй нормализатор — заводить второй способ ошибиться.
+      - name: Событие — исход публикации
+        if: always() && needs.build.outputs.event_app != ''
+        uses: tr0llex/deploy-kit/.github/actions/notify@main
         with:
-          fetch-depth: 50
-
-      # Список изменений — украшение поверх публикации: ни одна его неудача не
-      # имеет права ни уронить шаг, ни отменить сообщение. Отсюда пустой файл
-      # заранее, warning вместо error и continue-on-error сверху.
-      - name: Собрать список изменений
-        continue-on-error: true
-        if: needs.build.result == 'success'
-        env:
-          CHANGELOG_FILE: /tmp/changelog.html
-          # Точка отсчёта есть только у push. Взять её с прода, как это делает
-          # static-site.yml, здесь нечем: version.json цель-файл не раздаёт, а
-          # рядом с опубликованным файлом лежит только его сумма.
-          BEFORE: ${{ github.event_name == 'push' && github.event.before || '' }}
-          LINK_BASE: ${{ github.server_url }}/${{ github.repository }}
-        run: |
-          : > "$CHANGELOG_FILE"
-
-          # НЕТ ДИАПАЗОНА — НЕТ СПИСКА, и это осознанный отказ, а не пропуск
-          # ради простоты. Запуск руками (workflow_dispatch) — это повторная
-          # публикация, у которой «изменений с прошлого раза» не существует:
-          # прошлый раз ничем не помечен. Любой список здесь — догадка, выданная
-          # за перечень изменений релиза, и читателю чата отличить одно от
-          # другого нечем. Пустое место честнее.
-          if [ -z "${BEFORE:-}" ]; then
-            echo "прогон не по пушу — точки отсчёта нет, сообщение уедет без списка изменений"
-            exit 0
-          fi
-
-          # Качается с main, как и bin/selfupdate-upload выше: генератор один
-          # на все пути выкатки, копий в проектах нет.
-          if ! curl -fsSL https://raw.githubusercontent.com/tr0llex/deploy-kit/main/bin/changelog -o /tmp/changelog; then
-            echo "::warning::bin/changelog не скачался — сообщение уедет без списка изменений"
-            exit 0
-          fi
-          # timeout — по той же причине, что в static-site.yml: ревизию main в
-          # момент прогона здесь никто не закрепляет, а украшение поверх
-          # выкатки не может стать её потолком по времени.
-          if ! timeout 60 bash /tmp/changelog --repo "$GITHUB_WORKSPACE" --since "${BEFORE:-}" \
-                 --link-base "$LINK_BASE" --all > "$CHANGELOG_FILE"; then
-            echo "::warning::генератор списка изменений не отработал — сообщение уедет без него"
-            : > "$CHANGELOG_FILE"
-          fi
-
-      - name: Уведомить в Telegram
-        env:
-          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TITLE: ${{ needs.build.outputs.title }}
-          HOME_URL: ${{ needs.build.outputs.home }}
-          VERSION: ${{ needs.build.outputs.version }}
-          NOTIFY: ${{ needs.build.outputs.notify }}
-          STATUS: ${{ needs.build.result }}
-          CHANGELOG_FILE: /tmp/changelog.html
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          LINK_BASE: ${{ github.server_url }}/${{ github.repository }}
-          DOWNLOAD_URL: ${{ needs.build.outputs.verify_url }}
-          SELFUPDATE_URL: ${{ needs.build.outputs.selfupdate_url }}
-        run: |
-          # Правила NOTIFY те же, что у остальных целей: об успехе можно
-          # молчать, о провале — нельзя.
-          case "${NOTIFY:-all}:$STATUS" in
-            never:*)      exit 0 ;;
-            fail:success) exit 0 ;;
-          esac
-          if [ -z "$TOKEN" ] || [ -z "$CHAT" ]; then
-            echo "::warning::TELEGRAM_BOT_TOKEN или TELEGRAM_CHAT_ID не заданы — о публикации установщика никто не узнал"
-            exit 0
-          fi
-
-          # Название — ССЫЛКОЙ на страницу, с которой файл скачивают, как имя
-          # сервиса у соседей ведёт на сам сервис. Нет HEALTH в описании цели —
-          # остаётся голое название: пустой href увёл бы читателя в никуда.
-          NAME="$TITLE"
-          if [ -n "$HOME_URL" ]; then
-            NAME=$(printf '<a href="%s">%s</a>' "$HOME_URL" "$TITLE")
-          fi
-
-          if [ "$STATUS" = "success" ]; then
-            # Версия — ССЫЛКА НА КОММИТ, а не <code>: связь «коммит →
-            # публикация» только этой ссылкой в сообщении и выражена. Ровно так
-            # делает versionHTML в боте и notify в deploy.yml.
-            TEXT=$(printf '🚀 <b>%s</b> опубликован\n<a href="%s/commit/%s">%s</a>' \
-                     "$NAME" "$LINK_BASE" "$GITHUB_SHA" "$VERSION")
-            # Время сборки в MSK — как у бота (fmtTime: «02.01 15:04 MSK»).
-            TEXT=$(printf '%s\n<i>собрано %s</i>' "$TEXT" "$(TZ=Europe/Moscow date '+%d.%m %H:%M MSK')")
-            # Ссылка ведёт на сам файл: verify-url — это <файл>.sha256, хвост
-            # срезается. Пустой verify-url — просто без ссылки.
-            if [ -n "$DOWNLOAD_URL" ]; then
-              TEXT=$(printf '%s\n<a href="%s">скачать</a>' "$TEXT" "${DOWNLOAD_URL%.sha256}")
-            fi
-            # Сборка самообновления уже в админке, но НЕАКТИВНА — и сообщение
-            # обязано напомнить про ручной шаг: иначе «опубликован» читается
-            # как «пользователи обновятся», а они не обновятся никогда.
-            if [ -n "$SELFUPDATE_URL" ]; then
-              TEXT=$(printf '%s\n<i>сборка самообновления в админке; активной её делает переключение latest — руками</i>' "$TEXT")
-            fi
-            # Список — ПОСЛЕДНИМ блоком и через пустую строку, как у бота.
-            # Генератор отдаёт готовый фрагмент HTML со своим заголовком и уже
-            # экранированный: повторно не экранируем и свой заголовок не
-            # дописываем. Тема коммита — враждебный ввод (её пишет кто угодно с
-            # правом на пуш), и дальше она идёт только АРГУМЕНТОМ printf, не
-            # форматом.
-            CHANGES=""
-            if [ -s "$CHANGELOG_FILE" ]; then
-              CHANGES="$(cat "$CHANGELOG_FILE")"
-            fi
-            if [ -n "$CHANGES" ]; then
-              TEXT=$(printf '%s\n\n%s' "$TEXT" "$CHANGES")
-            fi
-          else
-            # Про «на сайте остался прежний файл» здесь не говорится: с каналом
-            # самообновления провал случается и ПОСЛЕ подмены файла, и
-            # утверждение стало бы враньём ровно в половине случаев.
-            TEXT=$(printf '💥 <b>%s</b> — публикация провалена\n<a href="%s/commit/%s">%s</a>\nЧто успело уехать — видно в прогоне.\n<a href="%s">лог прогона</a>' \
-                     "$NAME" "$LINK_BASE" "$GITHUB_SHA" "$VERSION" "$RUN_URL")
-          fi
-
-          # --- отправка: одним сообщением или несколькими подряд ------------
-          #
-          # Предел Telegram — 4096 единиц UTF-16 НА СООБЩЕНИЕ, и он жёсткий:
-          # текст длиннее API не режет, а ОТВЕРГАЕТ целиком. Раньше запаса
-          # хватало само собой — сообщение было в четыре строки; со списком
-          # изменений потолка у него нет. Режем ТОЛЬКО по границам строк: в
-          # строке стоит <a href="…">#21</a>, и рез посреди неё порвал бы тег,
-          # а невалидная разметка — снова отказ API. Код тот же, что в
-          # deploy.yml и static-site.yml.
-          LIMIT=4096
-          BUDGET=$(( LIMIT - 160 ))
-
-          if command -v jq >/dev/null 2>&1; then
-            # Считаем тем же счётом, что и Telegram, — в единицах UTF-16:
-            # символ вне BMP (эмодзи в шапке) занимает ДВЕ единицы.
-            line_len() { jq -Rrn 'inputs | ([explode[] | if . > 65535 then 2 else 1 end] | add // 0)'; }
-          else
-            # Без jq считаем байтами: в UTF-8 их всегда не меньше, чем единиц
-            # UTF-16, то есть оценка идёт В ЗАПАС.
-            line_len() { LC_ALL=C awk '{ print length($0) }'; }
-          fi
-
-          mapfile -t MSG_LINES <<< "$TEXT"
-          # tr -d '\r': вывод с CRLF дал бы «27\r», а для (( … )) это не число,
-          # но ошибка ТИХАЯ — условие просто ложно, и упаковка рассыпается на
-          # «по сообщению на строку».
-          mapfile -t MSG_LENS < <(printf '%s\n' "$TEXT" | line_len | tr -d '\r')
-
-          MEASURED=1
-          if (( ${#MSG_LENS[@]} != ${#MSG_LINES[@]} )); then
-            MEASURED=0
-          else
-            for n in "${MSG_LENS[@]}"; do
-              case "$n" in ''|*[!0-9]*) MEASURED=0; break ;; esac
-            done
-          fi
-
-          PARTS=()
-          if (( MEASURED == 0 )); then
-            echo "::warning::не удалось измерить сообщение — отправляю одним куском"
-            PARTS=("$TEXT")
-          else
-            cur=""; curlen=0; started=0
-            for i in "${!MSG_LINES[@]}"; do
-              l="${MSG_LINES[i]}"; n="${MSG_LENS[i]}"
-              if (( started == 0 )); then
-                cur="$l"; curlen=$n; started=1
-              elif (( curlen + 1 + n <= BUDGET )); then
-                cur="$cur"$'\n'"$l"; curlen=$(( curlen + 1 + n ))
-              else
-                PARTS+=("$cur"); cur="$l"; curlen=$n
-              fi
-            done
-            if (( started )); then PARTS+=("$cur"); fi
-          fi
-
-          TOTAL_PARTS=${#PARTS[@]}
-          PART_NO=0
-          for part in "${PARTS[@]}"; do
-            PART_NO=$(( PART_NO + 1 ))
-            if (( TOTAL_PARTS > 1 )); then
-              if (( PART_NO == 1 )); then
-                part="$part"$'\n'"<i>часть 1 из $TOTAL_PARTS — продолжение ниже</i>"
-              else
-                part="<b>$TITLE</b> — часть $PART_NO из $TOTAL_PARTS"$'\n'"$part"
-              fi
-            fi
-            # Ответ API РАЗБИРАЕТСЯ, а не выбрасывается: отвергнутое сообщение
-            # ничем иначе от отправленного не отличается — ни кодом curl, ни
-            # логом. В лог уходит только НОМЕР части и причина отказа: в
-            # остальном теле ответа Telegram возвращает эхом chat_id, а это
-            # секрет.
-            #
-            # Текст уезжает ЧЕРЕЗ STDIN (`text@-`), как в tg_send локальной
-            # выкатки. Этому job'у на ubuntu argv не страшен — но ровно этот
-            # шаг однажды уже жил на windows-раннере и уезжал в чат
-            # вопросиками (см. комментарий над job'ом): если его туда
-            # когда-нибудь вернут, stdin переживёт переезд, а argv — нет.
-            RESP="$(printf '%s' "$part" | curl -s -X POST "https://api.telegram.org/bot$TOKEN/sendMessage" \
-              -d chat_id="$CHAT" -d parse_mode=HTML -d disable_web_page_preview=true \
-              --data-urlencode "text@-" || true)"
-            # На первой же неудаче отправка прекращается: «1 из 3» и сразу
-            # «3 из 3» читается как «всё пришло».
-            case "$RESP" in
-              *'"ok":true'*) ;;
-              *)
-                WHY="$(printf '%s' "$RESP" \
-                  | sed -n 's/.*"description"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
-                echo "::warning::Telegram не принял часть $PART_NO из $TOTAL_PARTS — уведомление дошло не полностью${WHY:+ ($WHY)}."
-                echo "::warning::Отправлено частей: $(( PART_NO - 1 )) из $TOTAL_PARTS, остальные не отправлялись."
-                break
-                ;;
-            esac
-          done
+          app: ${{ needs.build.outputs.event_app }}
+          kind: ${{ needs.build.result == 'success' && 'success' || 'failure' }}
+          version: ${{ needs.build.outputs.version }}
+          # Стадия — только у провала: у успеха контракт её ЗАПРЕЩАЕТ, и
+          # действие на непустую стадию при kind=success ответит ошибкой.
+          stage: ${{ needs.build.result == 'success' && '' || needs.build.outputs.stage }}
+          notify: ${{ needs.build.outputs.notify }}
+          ssh-key: ${{ secrets.DEPLOY_SSH_KEY }}
+          ssh-host: ${{ secrets.DEPLOY_HOST }}
+          ssh-user: ${{ secrets.DEPLOY_USER }}
