@@ -897,7 +897,7 @@ fi
 # получал, а событие — нет, потому что у действия просто не было входа для
 # готового HTML. В чате это выглядело как «бот пишет, но changelog никогда не
 # показывает», и отличить это от «изменений не было» на глаз нельзя.
-for WF in "$KIT/.github/workflows/static-site.yml" "$KIT/.github/workflows/go-service.yml"; do
+for WF in "$KIT/.github/workflows/static-site.yml" "$KIT/.github/workflows/go-service.yml"           "$KIT/.github/workflows/desktop-artifact.yml"; do
     NAME="$(basename "$WF")"
     if grep -q 'changelog-html:' "$WF"; then
         ok "$NAME передаёт список изменений в событие"
