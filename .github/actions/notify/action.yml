@@ -139,9 +139,13 @@ runs:
         # run_attempt входит в прообраз намеренно: повтор прогона одной
         # кнопкой — это НОВАЯ выкатка, о ней надо сказать новым сообщением, а
         # не дописать в позавчерашнее.
-        DK_REPO: ${{ github.repository }}
-        DK_RUN_ID: ${{ github.run_id }}
-        DK_RUN_ATTEMPT: ${{ github.run_attempt }}
+        #
+        # Эти три значения сюда НЕ передаются: lib/notify.sh читает их сам из
+        # GITHUB_REPOSITORY, GITHUB_RUN_ID и GITHUB_RUN_ATTEMPT, а внутри
+        # шага составного действия они те же, что в github.*. Передавать их
+        # ещё и аргументами значит завести второй источник правды о ключе
+        # группы — и первая же попытка это сделать уронила выкатку: у
+        # notify.sh нет и не должно быть флагов --repo/--run-id.
         DK_ACTION_PATH: ${{ github.action_path }}
       run: |
         set -uo pipefail
@@ -256,12 +260,9 @@ runs:
           --source ci
           --kind "$DK_KIND"
           --app "$DK_APP"
-          --repo "$DK_REPO"
-          --run-id "$DK_RUN_ID"
-          --run-attempt "$DK_RUN_ATTEMPT"
-          --ssh-key "$KEY_FILE"
-          --ssh-host "$DK_SSH_HOST"
-          --ssh-user "$DK_SSH_USER"
+          --key "$KEY_FILE"
+          --host "$DK_SSH_HOST"
+          --user "$DK_SSH_USER"
         )
         # Необязательное поле ОТСУТСТВУЕТ, а не приезжает пустым (контракт,
         # §4): "previous": "" читается как «предыдущей версии нет», хотя на
