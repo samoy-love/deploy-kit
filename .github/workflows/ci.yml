@@ -210,3 +210,29 @@ jobs:
         run: |
           bash <(curl -sSf "https://raw.githubusercontent.com/rhysd/actionlint/v${ACTIONLINT_VERSION}/scripts/download-actionlint.bash") "$ACTIONLINT_VERSION"
           ./actionlint -color
+
+  # Переименование или слияние задач CI не красит прогон в красный — красной
+  # становится защита ветки, и только через день, на СЛЕДУЮЩЕМ PR: main ждёт
+  # проверку по старому имени вечно, а "Merge" молчит о причине. Руками это
+  # правится в Settings → Branches, но руками же и забывается.
+  #
+  # У задачи свои права: administration: read сверх общего contents: read —
+  # без него GitHub API защиты ветки отвечает отказом в доступе. Права даны
+  # только этой задаче, а не всей задаче commits/shell/nginx/workflows выше,
+  # по тому же принципу минимума, что и общий permissions: contents: read
+  # у workflow.
+  protection-sync:
+    name: Защита ветки соответствует задачам CI
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      administration: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Сверить задачи с обязательными проверками main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SELF_JOB_NAME: Защита ветки соответствует задачам CI
+        run: bash ci/branch-protection-check.sh
