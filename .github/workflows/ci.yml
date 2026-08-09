@@ -210,3 +210,31 @@ jobs:
         run: |
           bash <(curl -sSf "https://raw.githubusercontent.com/rhysd/actionlint/v${ACTIONLINT_VERSION}/scripts/download-actionlint.bash") "$ACTIONLINT_VERSION"
           ./actionlint -color
+
+  # Переименование или слияние задач CI не красит прогон в красный — красной
+  # становится защита ветки, и только через день, на СЛЕДУЮЩЕМ PR: main ждёт
+  # проверку по старому имени вечно, а "Merge" молчит о причине. Руками это
+  # правится в Settings → Branches, но руками же и забывается.
+  #
+  # GITHUB_TOKEN сюда не годится: у него в принципе нет permission scope для
+  # чтения защиты ветки (полный список — actions, artifact-metadata,
+  # attestations, checks, contents, deployments, discussions, id-token,
+  # issues, models, packages, pages, pull-requests, repository-projects,
+  # security-events, statuses; administration среди них нет, хотя REST API и
+  # называет его так). Отсюда PROTECTION_READ_TOKEN — fine-grained PAT на
+  # deploy-kit с двумя правами: Administration: Read-only (список обязательных
+  # проверок) и Actions: Read-only (список задач текущего прогона — тем же
+  # токеном читаются обе стороны сравнения). Лежит в secrets репозитория и
+  # передаётся только этому шагу, а не всей задаче.
+  protection-sync:
+    name: Защита ветки соответствует задачам CI
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Сверить задачи с обязательными проверками main
+        env:
+          GH_TOKEN: ${{ secrets.PROTECTION_READ_TOKEN }}
+          SELF_JOB_NAME: Защита ветки соответствует задачам CI
+        run: bash ci/branch-protection-check.sh
