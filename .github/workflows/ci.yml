@@ -216,23 +216,25 @@ jobs:
   # проверку по старому имени вечно, а "Merge" молчит о причине. Руками это
   # правится в Settings → Branches, но руками же и забывается.
   #
-  # У задачи свои права: administration: read сверх общего contents: read —
-  # без него GitHub API защиты ветки отвечает отказом в доступе. Права даны
-  # только этой задаче, а не всей задаче commits/shell/nginx/workflows выше,
-  # по тому же принципу минимума, что и общий permissions: contents: read
-  # у workflow.
+  # GITHUB_TOKEN сюда не годится: у него в принципе нет permission scope для
+  # чтения защиты ветки (полный список — actions, artifact-metadata,
+  # attestations, checks, contents, deployments, discussions, id-token,
+  # issues, models, packages, pages, pull-requests, repository-projects,
+  # security-events, statuses; administration среди них нет, хотя REST API и
+  # называет его так). Отсюда PROTECTION_READ_TOKEN — fine-grained PAT на
+  # deploy-kit с двумя правами: Administration: Read-only (список обязательных
+  # проверок) и Actions: Read-only (список задач текущего прогона — тем же
+  # токеном читаются обе стороны сравнения). Лежит в secrets репозитория и
+  # передаётся только этому шагу, а не всей задаче.
   protection-sync:
     name: Защита ветки соответствует задачам CI
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    permissions:
-      contents: read
-      administration: read
     steps:
       - uses: actions/checkout@v7
 
       - name: Сверить задачи с обязательными проверками main
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.PROTECTION_READ_TOKEN }}
           SELF_JOB_NAME: Защита ветки соответствует задачам CI
         run: bash ci/branch-protection-check.sh

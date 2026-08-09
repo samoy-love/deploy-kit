@@ -29,6 +29,7 @@ set -uo pipefail
 
 : "${GITHUB_REPOSITORY:?нужен GITHUB_REPOSITORY (запуск вне GitHub Actions?)}"
 : "${GITHUB_RUN_ID:?нужен GITHUB_RUN_ID (запуск вне GitHub Actions?)}"
+: "${GH_TOKEN:?нужен PAT с правом Administration: Read-only (secrets.PROTECTION_READ_TOKEN) — у GITHUB_TOKEN такого scope не бывает}"
 
 BASE_BRANCH="${BASE_BRANCH:-main}"
 
