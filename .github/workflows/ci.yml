@@ -43,7 +43,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -74,7 +74,7 @@ jobs:
     # как «CI задумался», а не как красная задача.
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # bin/* глобом, а не перечислением. Перечисление уже разъехалось:
       # bin/install-server не попадал ни сюда, ни в shellcheck — то есть
@@ -172,7 +172,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Настоящий nginx той же версии, что на проде: 1.24 не знает директивы
       # `http2 on`, и конфиг, валидный для свежего nginx, там просто не встанет.
@@ -196,7 +196,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Версия закреплена тегом релиза, а не веткой main самого actionlint:
       # раньше скрипт скачивания и сам бинарь ставились с main без пина, то
