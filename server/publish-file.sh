@@ -85,10 +85,13 @@ notify_event() {
         log "notify.sh не найден — событие «$*» не отправлено"
         return 0
     fi
+    # Вызов идёт УЖЕ на сервере — доставать себя же по SSH незачем, событие
+    # просто дописывается в журнал напрямую. Без --mode notify.sh молча берёт
+    # умолчание "ssh" и требует --host, которого здесь никогда не будет.
     if command -v timeout >/dev/null 2>&1; then
-        timeout 30 bash "$DK_NOTIFY" "$@" </dev/null || warn "событие не отправлено (код $?): $*"
+        timeout 30 bash "$DK_NOTIFY" --mode local "$@" </dev/null || warn "событие не отправлено (код $?): $*"
     else
-        bash "$DK_NOTIFY" "$@" </dev/null || warn "событие не отправлено (код $?): $*"
+        bash "$DK_NOTIFY" --mode local "$@" </dev/null || warn "событие не отправлено (код $?): $*"
     fi
     return 0
 }
