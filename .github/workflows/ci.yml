@@ -230,11 +230,24 @@ jobs:
     name: Защита ветки соответствует задачам CI
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ secrets.PROTECTION_READ_TOKEN }}
     steps:
+      # Секреты репозитория не отдаются прогонам dependabot и форков — там
+      # PAT приходит пустым. Сверять нечего: задача проверяет настройку
+      # репозитория, а не содержимое PR, и на своих ветках отработает та же
+      # проверка. Падать здесь — значит красить чужие PR за то, чего они не
+      # ломали, поэтому пропускаем явно и вслух.
+      - name: Пропустить сверку без доступа к защите ветки
+        if: env.GH_TOKEN == ''
+        run: |
+          echo "::notice::PAT недоступен (dependabot или форк) — сверка защиты ветки пропущена"
+
       - uses: actions/checkout@v7
+        if: env.GH_TOKEN != ''
 
       - name: Сверить задачи с обязательными проверками main
+        if: env.GH_TOKEN != ''
         env:
-          GH_TOKEN: ${{ secrets.PROTECTION_READ_TOKEN }}
           SELF_JOB_NAME: Защита ветки соответствует задачам CI
         run: bash ci/branch-protection-check.sh
