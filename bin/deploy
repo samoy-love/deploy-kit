@@ -489,13 +489,23 @@ if ! (( DRY )); then
         [[ -n "$CL_LIVE" ]] || CL_LIVE="$(printf '%s\n' "$VJ" \
             | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
     fi
+    # ВТОРОЙ ИСТОЧНИК — СИМЛИНК РЕЛИЗА НА ХОСТЕ, как и в обоих workflow: у цели
+    # без VERSION_URL прод по HTTP молчит, но current -> releases/release-<дата>-<sha>
+    # знает и так, а sha из имени генератор достаёт сам. Ошибка ssh — не провал.
+    if [[ -z "$CL_LIVE" ]] && (( ! PUBLISH_MODE )); then
+        CL_LIVE="$("${SSH[@]}" "readlink -f '$ROOT/current' 2>/dev/null" 2>/dev/null | xargs -r basename 2>/dev/null || true)"
+        case "$CL_LIVE" in
+            release-*|manual-*) log "живой релиз прочитан с хоста: $CL_LIVE (симлинк current)" ;;
+            *) CL_LIVE="" ;;
+        esac
+    fi
     if [[ -n "$CL_LIVE" ]]; then
         CL_ARGS+=(--live "$CL_LIVE" --deepen)
     else
         # Молчать нельзя по той же причине, что в CI: без живого прода диапазон
         # откатывается на тег/последние N коммитов, и это цена, которую стоит
         # видеть, а не только знать из этого комментария.
-        log "прод не сказал, что на нём стоит (нет VERSION_URL, прод недоступен или version.json без полей commit/version) — список изменений считается от тега/последних коммитов"
+        log "прод не сказал, что на нём стоит (нет VERSION_URL или прод недоступен, и симлинк current на хосте не прочитался) — список изменений считается от тега/последних коммитов"
     fi
 
     if command -v timeout >/dev/null 2>&1; then
