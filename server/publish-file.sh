@@ -21,7 +21,10 @@
 #   3. прежний файл остаётся жёсткой ссылкой <dest>.prev — мгновенный ручной
 #      откат без повторной сборки: mv ChillHub-Setup.exe.prev ChillHub-Setup.exe;
 #   4. рядом публикует <dest>.sha256, чтобы скачавший мог проверить файл, а
-#      пайплайн — сверить, что прод раздаёт именно эту сборку.
+#      пайплайн — сверить, что прод раздаёт именно эту сборку;
+#   5. с --version рядом ложится и <dest>.json — манифест для самообновления
+#      клиента: версия, сумма и размер. Приложение на консоли сравнивает с
+#      ним свою версию и по нему же проверяет скачанное.
 #
 # Замок хоста тут НЕ берётся: скрипт не трогает ни релизы, ни nginx, ни
 # systemd — только подменяет файл в своём каталоге, и делает это атомарно.
@@ -128,8 +131,8 @@ HAVE="$(free_mb "$DESTDIR")"
 # Временные имена начинаются с точки: location /downloads/ раздаёт из каталога
 # всё подряд, а недокопированный файл не должен быть скачиваемым даже у того,
 # кто угадает имя. mktemp даёт 0600 и непредсказуемый хвост.
-TMP=""; TMPSHA=""
-cleanup() { rm -f -- "$TMP" "$TMPSHA"; }
+TMP=""; TMPSHA=""; TMPJSON=""
+cleanup() { rm -f -- "$TMP" "$TMPSHA" "$TMPJSON"; }
 trap cleanup EXIT
 
 TMP="$(mktemp "$DESTDIR/.$BASE.new.XXXXXXXX")"
@@ -163,6 +166,20 @@ if [[ -n "$GOT" ]]; then
     fi
     mv -f -- "$TMPSHA" "$DEST.sha256"
     TMPSHA=""
+fi
+
+# Манифест самообновления. Только при --version: без версии сравнивать
+# клиенту не с чем, а выдумывать её нельзя. Атомарно, как и всё остальное.
+if [[ -n "$VERSION" && -n "$GOT" ]]; then
+    TMPJSON="$(mktemp "$DESTDIR/.$BASE.json.XXXXXXXX")"
+    printf '{"version":"%s","file":"%s","sha256":"%s","size":%s}\n' \
+        "$VERSION" "$BASE" "$GOT" "$(stat -c%s -- "$DEST")" > "$TMPJSON"
+    chmod 0644 "$TMPJSON"
+    if [[ -f "$DEST.json" ]]; then
+        ln -f -- "$DEST.json" "$DEST.json.prev"
+    fi
+    mv -f -- "$TMPJSON" "$DEST.json"
+    TMPJSON=""
 fi
 
 SIZE="$(du -h -- "$DEST" | cut -f1)"

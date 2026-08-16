@@ -71,6 +71,16 @@ on:
         required: false
         type: string
         default: ''
+      runner:
+        # Артефакт бывает не только установщиком под Windows: сборка .nro для
+        # Nintendo Switch идёт на ubuntu в контейнере devkitPro, который
+        # BUILD_CMD поднимает сам через docker. Всё остальное — описание цели,
+        # сумма, публикация, событие — одинаково на обоих раннерах: шаги ниже
+        # написаны на bash, а pwsh на ubuntu-latest тоже есть.
+        description: 'Раннер сборки: windows-latest (умолчание) или ubuntu-latest'
+        required: false
+        type: string
+        default: 'windows-latest'
 
 # Только чтение: единственным потребителем contents: write был шаг публикации
 # GitHub Release — канал удалён, релизы хозяйству не нужны, артефакты
@@ -101,7 +111,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 45
     # Всё, что нужно job'у уведомления. Он идёт на ubuntu (см. его шапку) и
     # описания цели уже не видит: файл лежит в репозитории проекта, а читает
@@ -425,6 +435,8 @@ jobs:
           USER: ${{ secrets.DEPLOY_USER }}
           ARTIFACT: ${{ steps.cfg.outputs.artifact }}
           UPLOAD_DEST: ${{ steps.cfg.outputs.upload_dest }}
+          APP: ${{ steps.cfg.outputs.event_app }}
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
           REMOTE_DIR="$(ssh -i ~/.ssh/deploy_key "$USER@$HOST" 'mktemp -d /tmp/dk-XXXXXXXXXX' | tr -d '\r' | tail -1)"
           case "$REMOTE_DIR" in
@@ -435,9 +447,12 @@ jobs:
 
           BASE="$(basename "$ARTIFACT")"
           scp -i ~/.ssh/deploy_key "$ARTIFACT" "$ARTIFACT.sha256" "$USER@$HOST:$REMOTE_DIR/"
+          # --app и --version — как у dk deploy: публикатор кладёт по ним
+          # событие `published` и манифест <dest>.json для самообновления.
           ssh -i ~/.ssh/deploy_key "$USER@$HOST" \
             "sudo /opt/deploy-kit/publish-file.sh --file '$REMOTE_DIR/$BASE' \
-               --sha256 '$REMOTE_DIR/$BASE.sha256' --dest '$UPLOAD_DEST'"
+               --sha256 '$REMOTE_DIR/$BASE.sha256' --dest '$UPLOAD_DEST' \
+               --app '$APP' --version '$VERSION'"
 
       # «Зелёный деплой со старыми файлами» ловится именно здесь: сумма,
       # посчитанная на раннере, сверяется с той, что РАЗДАЁТ прод. Это тот же
