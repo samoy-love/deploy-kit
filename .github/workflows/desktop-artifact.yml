@@ -762,7 +762,11 @@ jobs:
           # действие на непустую стадию при kind=success ответит ошибкой.
           # У провала она обязательна; если job упал там, где шаг «Стадия
           # провала» её не увидел, — preflight, как и внутри самого шага.
-          stage: ${{ (needs.build.result == 'success' || needs.build.outputs.published == 'true') && '' || (needs.build.outputs.stage || 'preflight') }}
+          #
+          # Условие вывернуто нарочно: в выражениях Actions `a && '' || b`
+          # при истинном a даёт b — пустая строка ложна, и «тернарник»
+          # проваливается во вторую ветку. Успех обязан быть в ветке `|| ''`.
+          stage: ${{ (needs.build.result != 'success' && needs.build.outputs.published != 'true') && (needs.build.outputs.stage || 'preflight') || '' }}
           notify: ${{ needs.build.outputs.notify }}
           changelog-html: /tmp/changelog.txt
           ssh-key: ${{ secrets.DEPLOY_SSH_KEY }}
