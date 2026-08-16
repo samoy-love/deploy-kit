@@ -378,7 +378,7 @@ ZIP полезной нагрузки уезжает в админку лаун�
 | Установщик ChillHub | desktop-artifact | [chillhub](https://github.com/tr0llex/chillhub) |
 | Сервер и клиент Snakes | go-service | [snakes](https://github.com/tr0llex/snakes) |
 | status.samoy.love, агент и телеграм-бот статуса | static-site + go-service | [status.samoy.love](https://github.com/tr0llex/status.samoy.love) |
-| die.samoy.love, dev.die.samoy.love | static-site | [double-or-die](https://github.com/tr0llex/double-or-die) |
+| die.samoy.love                     | static-site | [double-or-die](https://github.com/tr0llex/double-or-die) |
 | Стек мониторинга (Prometheus, Grafana) | compose-стек через systemd-юнит | [metrics.samoy.love](https://github.com/tr0llex/metrics.samoy.love) |
 
 Клиент Snakes едет **одним артефактом** с сервером: у них общий бинарный

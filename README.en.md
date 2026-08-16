@@ -396,7 +396,7 @@ Current targets:
 | ChillHub installer | desktop-artifact | [chillhub](https://github.com/tr0llex/chillhub) |
 | Snakes server and client | go-service | [snakes](https://github.com/tr0llex/snakes) |
 | status.samoy.love, its agent and status Telegram bot | static-site + go-service | [status.samoy.love](https://github.com/tr0llex/status.samoy.love) |
-| die.samoy.love, dev.die.samoy.love | static-site | [double-or-die](https://github.com/tr0llex/double-or-die) |
+| die.samoy.love                     | static-site | [double-or-die](https://github.com/tr0llex/double-or-die) |
 | Monitoring stack (Prometheus, Grafana) | compose stack via systemd unit | [metrics.samoy.love](https://github.com/tr0llex/metrics.samoy.love) |
 
 The Snakes client ships in **one artifact** with its server: they share a
