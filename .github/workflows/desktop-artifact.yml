@@ -138,6 +138,12 @@ jobs:
       # вынужденно). Контекст steps соседу недоступен, а стадию знает только
       # тот, кто эти шаги выполнял.
       stage: ${{ steps.stage.outputs.stage }}
+      # Файл опубликован и сверен с продом, даже если job после этого
+      # покраснел: post-шаг кеша, чистка ключа — что угодно, что уже не
+      # меняет прод. Соседний job по этому флагу объявляет успех, а не
+      # провал без стадии: событие «failure» о выкатке, которую пользователи
+      # уже качают, — ложь, и контракт стадий её к тому же не принимает.
+      published: ${{ steps.upload.outcome == 'success' && steps.verify.outcome != 'failure' && steps.selfupdate.outcome != 'failure' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -747,11 +753,16 @@ jobs:
         uses: tr0llex/deploy-kit/.github/actions/notify@main
         with:
           app: ${{ needs.build.outputs.event_app }}
-          kind: ${{ needs.build.result == 'success' && 'success' || 'failure' }}
+          # Успех — это опубликованный и сверенный файл (выход published), а
+          # не зелёный job: провал после публикации (post-шаги) прод уже не
+          # меняет и событием о выкатке быть не может.
+          kind: ${{ (needs.build.result == 'success' || needs.build.outputs.published == 'true') && 'success' || 'failure' }}
           version: ${{ needs.build.outputs.version }}
           # Стадия — только у провала: у успеха контракт её ЗАПРЕЩАЕТ, и
           # действие на непустую стадию при kind=success ответит ошибкой.
-          stage: ${{ needs.build.result == 'success' && '' || needs.build.outputs.stage }}
+          # У провала она обязательна; если job упал там, где шаг «Стадия
+          # провала» её не увидел, — preflight, как и внутри самого шага.
+          stage: ${{ (needs.build.result == 'success' || needs.build.outputs.published == 'true') && '' || (needs.build.outputs.stage || 'preflight') }}
           notify: ${{ needs.build.outputs.notify }}
           changelog-html: /tmp/changelog.txt
           ssh-key: ${{ secrets.DEPLOY_SSH_KEY }}
