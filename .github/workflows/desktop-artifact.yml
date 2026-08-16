@@ -26,9 +26,21 @@ name: desktop-artifact
 #
 # Ключи описания: APP, TITLE, BUILD_CMD (bash-строка; PowerShell зовётся в ней
 # явно), ARTIFACT_FILE, VERSION_CMD, PUBLISH_DEST, VERIFY_URL, HEALTH,
-# SELFUPDATE_URL, SELFUPDATE_ZIP, NOTIFY. Описание цели сильнее одноимённых
-# входов — ровно как NGINX_CONF в static-site.yml: оно ближе к выкатке и
-# читается обоими путями.
+# SELFUPDATE_URL, SELFUPDATE_ZIP, NOTIFY, CACHE_PATHS, CACHE_KEY_FILES,
+# CACHE_KEY_CMD. Описание цели сильнее одноимённых входов — ровно как
+# NGINX_CONF в static-site.yml: оно ближе к выкатке и читается обоими путями.
+#
+# Кеш сборки — три ключа, все необязательные, и читает их только пайплайн
+# (dk deploy собирает в дереве разработчика, где всё и так лежит):
+#   CACHE_PATHS      что сохранять между прогонами, по пути на строку —
+#                    например собранная зависимость или скачанный бандл;
+#   CACHE_KEY_FILES  файлы (через пробел), от которых зависит содержимое:
+#                    изменились — ключ новый;
+#   CACHE_KEY_CMD    bash-команда, чей вывод тоже входит в ключ — например
+#                    контрольная сумма бандла с сервера. Не смогла — не
+#                    беда: кеш просто ключуется без неё.
+# Частичное совпадение восстанавливается по префиксу цели, так что смена
+# одного слагаемого не выбрасывает остальное содержимое.
 #
 # Отдельные входы build/artifact/… остаются для проверочных сборок, которым
 # описание цели не нужно («собирается ли установщик вообще»).
@@ -148,9 +160,12 @@ jobs:
       - name: Кеш NuGet
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
+          # Пути обоих раннеров разом: какой из них выбран, решает вход
+          # runner, а несуществующий путь кешу не мешает.
           path: |
             ~\AppData\Local\NuGet\v3-cache
             ~\.nuget\packages
+            ~/.nuget/packages
           key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', '**/packages.lock.json', '**/packages.config') }}
           restore-keys: |
             ${{ runner.os }}-nuget-
@@ -158,7 +173,9 @@ jobs:
       - name: Кеш npm
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~\AppData\Roaming\npm-cache
+          path: |
+            ~\AppData\Roaming\npm-cache
+            ~/.npm
           key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
           restore-keys: |
             ${{ runner.os }}-npm-
@@ -183,6 +200,7 @@ jobs:
           APP=""; TITLE=""; BUILD_CMD=""; ARTIFACT_FILE=""; VERSION_CMD=""
           PUBLISH_DEST=""; VERIFY_URL=""; HEALTH=""
           SELFUPDATE_URL=""; SELFUPDATE_ZIP=""; NOTIFY=""
+          CACHE_PATHS=""; CACHE_KEY_FILES=""; CACHE_KEY_CMD=""
           if [ -n "$CONFIG" ]; then
             # Путь обязан быть относительным и не выходить из репозитория —
             # ровно те же требования, что у config в static-site.yml.
@@ -247,12 +265,44 @@ jobs:
             echo "selfupdate_zip=$SELFUPDATE_ZIP"
             echo "notify=${NOTIFY:-all}"
           } >> "$GITHUB_OUTPUT"
+          # Ключ кеша считается здесь, а не выражением hashFiles в шаге кеша:
+          # список файлов и команда приходят из описания цели, а не из текста
+          # workflow. Слагаемых два — файлы и вывод команды; пустое слагаемое
+          # даёт стабильный «пустой» хеш, а не сломанный ключ.
+          if [ -n "$CACHE_PATHS" ]; then
+            FILES_HASH="$( { for f in $CACHE_KEY_FILES; do [ -f "$f" ] && sha256sum "$f"; done; } | sha256sum | cut -c1-16)"
+            CMD_OUT=""
+            if [ -n "$CACHE_KEY_CMD" ]; then
+              CMD_OUT="$(bash -c "$CACHE_KEY_CMD" 2>/dev/null || true)"
+              [ -n "$CMD_OUT" ] || echo "::warning::CACHE_KEY_CMD ничего не напечатала — кеш ключуется только по файлам"
+            fi
+            CMD_HASH="$(printf '%s' "$CMD_OUT" | sha256sum | cut -c1-16)"
+            {
+              # Многострочное значение — только через ограничитель; выход
+              # задаётся лишь при непустом списке, чтобы шаг кеша не
+              # включался из-за одной пустой строки.
+              echo "cache_paths<<DK_EOF"; echo "$CACHE_PATHS"; echo "DK_EOF"
+              echo "cache_key=${APP:-artifact}-$FILES_HASH-$CMD_HASH"
+              echo "cache_prefix=${APP:-artifact}-"
+            } >> "$GITHUB_OUTPUT"
+          fi
           # Половина канала самообновления без другой — молча пропущенный шаг,
           # ровно как пара NGINX_CONF/NGINX_DEST в static-site.yml.
           if [ -n "$SELFUPDATE_URL$SELFUPDATE_ZIP" ] && { [ -z "$SELFUPDATE_URL" ] || [ -z "$SELFUPDATE_ZIP" ]; }; then
             echo "::error::SELFUPDATE_URL и SELFUPDATE_ZIP задаются парой — иначе сборка самообновления молча не уедет"
             exit 1
           fi
+
+      # Кеш сборки цели — по её описанию (см. шапку). Ключ посчитан шагом
+      # выше; промах — не ошибка, сборка сделает всё сама, как и без кеша.
+      - name: Кеш сборки
+        if: steps.cfg.outputs.cache_paths != ''
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.cfg.outputs.cache_paths }}
+          key: ${{ runner.os }}-build-${{ steps.cfg.outputs.cache_key }}
+          restore-keys: |
+            ${{ runner.os }}-build-${{ steps.cfg.outputs.cache_prefix }}
 
       - name: Версия релиза
         id: ver
