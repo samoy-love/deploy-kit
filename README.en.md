@@ -356,6 +356,14 @@ target: the payload ZIP goes to the launcher admin panel
 manifest. `latest.json` is never switched by automation: a human makes the
 version active in the admin panel — that is the boundary by design.
 
+Caching between pipeline runs is described in the same file: `CACHE_PATHS` —
+what to keep (one path per line: a built dependency, a downloaded bundle),
+`CACHE_KEY_FILES` — files the contents depend on, `CACHE_KEY_CMD` — a command
+whose output is also part of the key (e.g. the checksum of a bundle on the
+server). All three are optional and read only by the pipeline; a cache miss
+is not an error, just a normal build. npm/NuGet and Go module caches are on in
+every archetype without configuration.
+
 What a project must provide to enter the pipeline: `/healthz` returning 200 and
 the body `ok` without authentication, `/version.json` with `version`, `commit`
 and `builtAt`, and the standard layout
