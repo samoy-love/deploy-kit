@@ -83,6 +83,24 @@ on:
         required: false
         type: string
         default: ''
+      dry-run:
+        # Сухой прогон СОБИРАЕТ, но не публикует. Входа здесь не было вовсе, и
+        # это не мелочь: остальные архетипы его принимают, вызывающий пишет
+        # `dry-run: ${{ inputs.dry-run == true }}` по образцу соседней цели —
+        # и получает ошибку запуска, потому что у переиспользуемого workflow
+        # такого входа нет. Поэтому его и не писали, а `workflow_dispatch` с
+        # галкой «показать план, ничего не менять» у цели-файла ПУБЛИКОВАЛ
+        # установщик на прод: сухого прогона у единственной цели, которая
+        # раздаётся пользователям напрямую, не существовало вовсе.
+        #
+        # Сборка и проверки при сухом прогоне остаются: смысл его в том, чтобы
+        # узнать, собирается ли артефакт, не трогая прод. Не выполняются ровно
+        # те шаги, которые меняют мир, — публикация, сверка с продом, загрузка
+        # сборки самообновления — и события выкатки, которым нечего сказать.
+        description: 'Собрать и проверить, но не публиковать'
+        required: false
+        type: boolean
+        default: false
       runner:
         # Артефакт бывает не только установщиком под Windows: сборка .nro для
         # Nintendo Switch идёт на ubuntu в контейнере devkitPro, который
@@ -133,6 +151,10 @@ jobs:
       version: ${{ steps.ver.outputs.version }}
       notify: ${{ steps.cfg.outputs.notify }}
       upload_dest: ${{ steps.cfg.outputs.upload_dest }}
+      # Пути цели для списка изменений: job уведомления описания цели не видит
+      # (файл лежит в репозитории проекта, а читает его шаг сборки), поэтому
+      # значение уезжает выходом, как и всё остальное, что ему нужно.
+      changelog_paths: ${{ steps.cfg.outputs.changelog_paths }}
       # Стадия провала уезжает из job'а сборки наружу, потому что событие об
       # исходе отправляет СОСЕДНИЙ job (см. его шапку — он на ubuntu, и это
       # вынужденно). Контекст steps соседу недоступен, а стадию знает только
@@ -143,7 +165,23 @@ jobs:
       # меняет прод. Соседний job по этому флагу объявляет успех, а не
       # провал без стадии: событие «failure» о выкатке, которую пользователи
       # уже качают, — ложь, и контракт стадий её к тому же не принимает.
-      published: ${{ steps.upload.outcome == 'success' && steps.verify.outcome != 'failure' && steps.selfupdate.outcome != 'failure' }}
+      #
+      # ЗАГРУЗКИ САМООБНОВЛЕНИЯ ЗДЕСЬ НЕТ, И ЭТО ГЛАВНОЕ В ЭТОЙ СТРОКЕ.
+      #
+      # Она тут стояла и производила ровно ту ложь, от которой абзац выше
+      # предостерегает. Каналов у цели-файла два и они независимы: установщик
+      # на сайте (scp + publish-file.sh) и ZIP самообновления в админку
+      # лаунчера. Провал ВТОРОГО не отменяет того, что первый уже уехал и
+      # пользователи его качают, — а `published: false` превращал это в
+      # «❌ не выкачен — остановились на стадии: доставка на сервер», то есть
+      # указывал на исправный участок. Так в чате и вышло 22.08: сначала
+      # «📦 опубликован 1.5.28», через одиннадцать минут — «не выкачен».
+      #
+      # О несобранном манифесте по-прежнему говорит красный прогон: шаг
+      # «Загрузить сборку самообновления» роняет job НАМЕРЕННО (см. его
+      # комментарий), и это остаётся в силе. Меняется только то, что в чат
+      # уезжает правда о публикации, а не о втором канале.
+      published: ${{ steps.upload.outcome == 'success' && steps.verify.outcome != 'failure' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -270,6 +308,7 @@ jobs:
             echo "selfupdate_url=$SELFUPDATE_URL"
             echo "selfupdate_zip=$SELFUPDATE_ZIP"
             echo "notify=${NOTIFY:-all}"
+            echo "changelog_paths=${CHANGELOG_PATHS:-}"
           } >> "$GITHUB_OUTPUT"
           # Ключ кеша считается здесь, а не выражением hashFiles в шаге кеша:
           # список файлов и команда приходят из описания цели, а не из текста
@@ -405,7 +444,7 @@ jobs:
       # Недоставленное `started` сборку не роняет: решение принято внутри
       # действия и там же объяснено.
       - name: Событие — выкатка началась
-        if: steps.cfg.outputs.upload_dest != '' && steps.cfg.outputs.event_app != ''
+        if: ${{ steps.cfg.outputs.upload_dest != '' && steps.cfg.outputs.event_app != '' && !inputs.dry-run }}
         uses: tr0llex/deploy-kit/.github/actions/notify@main
         with:
           app: ${{ steps.cfg.outputs.event_app }}
@@ -454,6 +493,33 @@ jobs:
           # возможность проверить, что получил именно то, что собрано здесь.
           echo "$SHA  $(basename "$F")" > "$F.sha256"
 
+      # План сухого прогона — тем же по смыслу, чем отвечает `release.sh
+      # --dry-run` у остальных архетипов: показать, что БЫ поехало. Без него
+      # сухой прогон выглядел бы как обычный, только молча пропустивший три
+      # шага, и отличить «не опубликовал, потому что просили» от «не
+      # опубликовал, потому что сломался» было бы нечем.
+      - name: План сухого прогона
+        if: ${{ inputs.dry-run }}
+        shell: bash
+        env:
+          APP: ${{ steps.cfg.outputs.event_app }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          ARTIFACT: ${{ steps.cfg.outputs.artifact }}
+          UPLOAD_DEST: ${{ steps.cfg.outputs.upload_dest }}
+          VERIFY_URL: ${{ steps.cfg.outputs.verify_url }}
+          SELFUPDATE_URL: ${{ steps.cfg.outputs.selfupdate_url }}
+          SHA: ${{ steps.sum.outputs.sha }}
+        run: |
+          echo "--- план публикации (--dry-run, ничего не меняется) ---"
+          echo "приложение:     ${APP:-—}"
+          echo "версия:         ${VERSION:-—}"
+          echo "артефакт:       ${ARTIFACT:-—}"
+          echo "SHA-256:        ${SHA:-—}"
+          echo "опубликовать в: ${UPLOAD_DEST:-— (проверочная сборка)}"
+          echo "сверка с прода: ${VERIFY_URL:-нет}"
+          echo "самообновление: ${SELFUPDATE_URL:-нет}"
+          echo "событие о выкатке не отправляется: прод не тронут"
+
       # Подпись кода. Сертификата пока нет: у физлица доступен только OV, и
       # ключ по правилам CA/B Forum обязан лежать на аппаратном носителе —
       # в раннер его не воткнуть, нужна облачная подпись. Шаг включится сам,
@@ -484,7 +550,7 @@ jobs:
       # sudo, и между scp и установкой не должно быть окна для подмены.
       - name: Выложить на сервер
         id: upload
-        if: steps.cfg.outputs.upload_dest != ''
+        if: ${{ steps.cfg.outputs.upload_dest != '' && !inputs.dry-run }}
         shell: bash
         env:
           HOST: ${{ secrets.DEPLOY_HOST }}
@@ -493,6 +559,7 @@ jobs:
           UPLOAD_DEST: ${{ steps.cfg.outputs.upload_dest }}
           APP: ${{ steps.cfg.outputs.event_app }}
           VERSION: ${{ steps.ver.outputs.version }}
+          NOTIFY: ${{ steps.cfg.outputs.notify }}
         run: |
           REMOTE_DIR="$(ssh -i ~/.ssh/deploy_key "$USER@$HOST" 'mktemp -d /tmp/dk-XXXXXXXXXX' | tr -d '\r' | tail -1)"
           case "$REMOTE_DIR" in
@@ -505,17 +572,29 @@ jobs:
           scp -i ~/.ssh/deploy_key "$ARTIFACT" "$ARTIFACT.sha256" "$USER@$HOST:$REMOTE_DIR/"
           # --app и --version — как у dk deploy: публикатор кладёт по ним
           # событие `published` и манифест <dest>.json для самообновления.
+          #
+          # --group и --notify — чтобы событие публикации приехало в карточку
+          # ЭТОГО прогона, а не отдельным сообщением (docs/events.md, §6), и
+          # чтобы цель с NOTIFY=never молчала на обоих путях. Прообраз группы
+          # тот же, что считает lib/notify.sh: repo, run_id и attempt через
+          # «|», без перевода строки в конце.
+          #
+          # Аргументы уезжают через printf %q, а не в ручных апострофах:
+          # UPLOAD_DEST и APP приходят из описания цели в репозитории проекта
+          # и попадают в командную строку, которую выполняет root.
+          GROUP="$(printf '%s|%s|%s' "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "${GITHUB_RUN_ATTEMPT:-1}" | sha256sum | cut -d' ' -f1)"
+          ARGS=(--file "$REMOTE_DIR/$BASE" --sha256 "$REMOTE_DIR/$BASE.sha256"
+                --dest "$UPLOAD_DEST" --app "$APP" --version "$VERSION"
+                --group "$GROUP" --notify "${NOTIFY:-all}")
           ssh -i ~/.ssh/deploy_key "$USER@$HOST" \
-            "sudo /opt/deploy-kit/publish-file.sh --file '$REMOTE_DIR/$BASE' \
-               --sha256 '$REMOTE_DIR/$BASE.sha256' --dest '$UPLOAD_DEST' \
-               --app '$APP' --version '$VERSION'"
+            "sudo /opt/deploy-kit/publish-file.sh $(printf '%q ' "${ARGS[@]}")"
 
       # «Зелёный деплой со старыми файлами» ловится именно здесь: сумма,
       # посчитанная на раннере, сверяется с той, что РАЗДАЁТ прод. Это тот же
       # смысл, что сверка /version.json после выкатки сайта.
       - name: Сверить с прода
         id: verify
-        if: steps.cfg.outputs.upload_dest != '' && steps.cfg.outputs.verify_url != ''
+        if: ${{ steps.cfg.outputs.upload_dest != '' && steps.cfg.outputs.verify_url != '' && !inputs.dry-run }}
         shell: bash
         env:
           URL: ${{ steps.cfg.outputs.verify_url }}
@@ -556,7 +635,7 @@ jobs:
       # следом: сборка самообновления без живой админки не уедет никуда.
       - name: Загрузить сборку самообновления
         id: selfupdate
-        if: steps.cfg.outputs.selfupdate_url != ''
+        if: ${{ steps.cfg.outputs.selfupdate_url != '' && !inputs.dry-run }}
         shell: bash
         env:
           SELFUPDATE_URL: ${{ steps.cfg.outputs.selfupdate_url }}
@@ -663,7 +742,7 @@ jobs:
   # кириллица и ломается (см. выше) — а тут она уедет прямо в чат.
   notify:
     needs: build
-    if: always() && needs.build.outputs.upload_dest != ''
+    if: ${{ always() && needs.build.outputs.upload_dest != '' && !inputs.dry-run }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -698,6 +777,9 @@ jobs:
           # откатится на тег или на последние коммиты.
           BEFORE: ${{ github.event_name == 'push' && github.event.before || '' }}
           LINK_BASE: ${{ github.server_url }}/${{ github.repository }}
+          # Что везёт цель — чтобы в список не попадали чужие куски
+          # монорепозитория. Пусто — вся история, как и раньше.
+          TARGET_PATHS: ${{ needs.build.outputs.changelog_paths }}
         run: |
           # Файл существует ВСЕГДА, пусть и пустой: читающий шаг смотрит только
           # на содержимое и не должен знать, дошло ли дело до генератора.
@@ -729,7 +811,7 @@ jobs:
           # который качается с main любой ревизии.
           if ! timeout 180 bash /tmp/changelog \
                  --repo "$GITHUB_WORKSPACE" --since "${BEFORE:-}" --deepen \
-                 --link-base "$LINK_BASE" --all > /tmp/changelog.txt; then
+                 --link-base "$LINK_BASE" --paths "${TARGET_PATHS:-}" --all > /tmp/changelog.txt; then
             echo "::warning::генератор списка изменений не отработал — публикация уедет без него"
             : > /tmp/changelog.txt
           fi
