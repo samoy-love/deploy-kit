@@ -30,6 +30,10 @@
 #   HEALTH=https://samoy.love/
 #   VERSION_URL=https://samoy.love/version.json
 #   NEIGHBOURS=metro.samoy.love,snakes.samoy.love
+#   CHANGELOG_PATHS='landing .htmlhintrc'   что везёт эта цель: список
+#                                  изменений считается только по этим путям.
+#                                  Пусто — вся история репозитория (годится
+#                                  проекту из одной цели, врёт в монорепо)
 #   LINK_BASE=https://github.com/tr0llex/deploy-kit   база ссылок на PR в
 #                                  списке изменений. Пусто — вывести из
 #                                  `git remote get-url origin`; none — не
@@ -468,6 +472,22 @@ if ! (( DRY )); then
     # поведению. Молча — это плохо, поэтому обрезку ловим по хвосту ниже.
     CL_ARGS+=(--max 0 --budget 0)
 
+    # ЧТО ВЕЗЁТ ЦЕЛЬ. В монорепозитории список «от прода до HEAD» накрывает и
+    # чужие цели: 22.08 карточка chillhub-site перечислила восемь PR при одном
+    # настоящем. Пути знает только описание цели, поэтому ключ читается отсюда
+    # и в точности так же называется в обоих workflow.
+    #
+    # Пробный вызов — по той же причине, что и у --link-base ниже: генераторов
+    # в хозяйстве одновременно два (этот файл зовёт соседний, workflow тянут с
+    # main), и незнакомый флаг стоил бы не фильтра, а всего списка целиком.
+    if [[ -n "${CHANGELOG_PATHS:-}" ]]; then
+        if cl_knows --paths "$CHANGELOG_PATHS"; then
+            CL_ARGS+=(--paths "$CHANGELOG_PATHS")
+        else
+            log "генератор списка изменений не знает --paths — в список попадут коммиты соседних целей репозитория"
+        fi
+    fi
+
     # База ссылок — только если генератор умеет её принимать И она вывелась.
     CL_LINK_BASE="$(link_base || true)"
     if [[ -n "$CL_LINK_BASE" ]] && cl_knows --link-base "$CL_LINK_BASE"; then
@@ -654,6 +674,55 @@ fi
 # же ключом, которым идёт сама выкатка: нового доступа событие не открывает,
 # писать в журнал сможет только тот, кто и так катит прод.
 NOTIFY_SH="$KIT_DIR/lib/notify.sh"
+
+# ГРУППА ПРОГОНА СЧИТАЕТСЯ ЗДЕСЬ И УЕЗЖАЕТ ОБЕИМ СТОРОНАМ.
+#
+# Событий об одной выкатке рождается два: это событие (отсюда, с машины) и
+# событие release.sh (там же, на сервере, где выкатка и произошла). Пока
+# группу каждый считал сам, они не совпадали НИКОГДА: прообраз локальной
+# группы включает hostname, а у машины разработчика и у сервера он разный.
+# По правилу §6 контракта «незнакомая group — новое сообщение» бот объявлял
+# одну выкатку дважды.
+#
+# Поэтому группа считается ровно один раз, здесь, и доезжает обоими путями:
+# переменной DK_GROUP — до собственного notify.sh, аргументом --group — до
+# release.sh и publish-file.sh.
+#
+# Прообраз — тот же, что описан в §6 для локальной выкатки: момент запуска
+# КОМАНДЫ, хост и pid команды. DK_RUN_STARTED_MS и DK_RUN_PID выставляет
+# bin/dk один раз на всю команду (в том числе на `dk deploy --all`); запуск
+# bin/deploy напрямую их не имеет — тогда прогоном честно считается один этот
+# вызов, что для одиночной цели ровно то, что нужно.
+dk_sha256() {
+    local out
+    if   command -v sha256sum >/dev/null 2>&1; then out="$(printf '%s' "$1" | sha256sum)";     out="${out%% *}"
+    elif command -v shasum    >/dev/null 2>&1; then out="$(printf '%s' "$1" | shasum -a 256)"; out="${out%% *}"
+    # openssl печатает «SHA256(stdin)= <хеш>» — здесь нужен последний столбец,
+    # а у sha256sum первый: перепутать их значит получить «-» вместо хеша.
+    elif command -v openssl   >/dev/null 2>&1; then out="$(printf '%s' "$1" | openssl dgst -sha256)"; out="${out##* }"
+    else return 1
+    fi
+    printf '%s' "$out" | tr -d ' 
+'
+}
+
+if [[ -z "${DK_GROUP:-}" ]]; then
+    if [[ -z "${DK_RUN_STARTED_MS:-}" ]]; then
+        # %3N есть у GNU date (Linux и Git Bash), у BSD его нет — там он
+        # приезжает буквально, и это ловится проверкой, а не уезжает в
+        # прообраз строкой «%3N».
+        DK_RUN_STARTED_MS="$(date -u +%s%3N 2>/dev/null || true)"
+        [[ "$DK_RUN_STARTED_MS" =~ ^[0-9]{13,}$ ]] || DK_RUN_STARTED_MS="$(( $(date -u +%s) * 1000 ))"
+    fi
+    DK_RUN_PID="${DK_RUN_PID:-$$}"
+    # Хеш не посчитался (нет ни одной из трёх утилит) — не беда и не повод
+    # ронять выкатку: пустая группа значит прежнее поведение, notify.sh
+    # посчитает свою.
+    DK_GROUP="$(dk_sha256 "$DK_RUN_STARTED_MS|$(hostname 2>/dev/null || echo unknown)|$DK_RUN_PID" 2>/dev/null || true)"
+fi
+[[ "${DK_GROUP:-}" =~ ^[0-9a-f]{64}$ ]] || DK_GROUP=""
+export DK_GROUP DK_RUN_STARTED_MS DK_RUN_PID
+[[ -n "$DK_GROUP" ]] || warn "группу прогона посчитать нечем — выкатка объявится отдельным сообщением"
 
 # Отправка события. Наружу ВСЕГДА ноль.
 #
@@ -881,7 +950,8 @@ if (( PUBLISH_MODE )); then
     # файл, он сам кладёт в журнал `published`, и без имени цели рассказать о
     # публикации ему нечем. Значения те же, что уедут в событие отсюда.
     PUB_ARGS=(--file "$REMOTE_TMP/$BASE" --sha256 "$REMOTE_TMP/$BASE.sha256" --dest "$PUBLISH_DEST"
-              --app "$APP" --version "$VERSION")
+              --app "$APP" --version "$VERSION" --notify "${NOTIFY:-all}")
+    [[ -n "$DK_GROUP" ]] && PUB_ARGS+=(--group "$DK_GROUP")
     "${SSH[@]}" "sudo /opt/deploy-kit/publish-file.sh $(printf '%q ' "${PUB_ARGS[@]}")" \
         || die "публикация $APP провалена — на сервере остался прежний файл"
 
@@ -1002,6 +1072,10 @@ ARGS=(--app "$APP" --version "$VERSION" --archive "$REMOTE_ARCHIVE" --root "$ROO
 [[ "${WRITE_VERSION_FILE:-1}" == "0" ]] && ARGS+=(--no-version-file)
 (( ALLOW_SAME )) && ARGS+=(--allow-same-version)
 (( DRY )) && ARGS+=(--dry-run)
+# Группа прогона и правило NOTIFY — чтобы событие release.sh приехало в ту же
+# карточку и подчинялось той же настройке цели, что и событие отсюда.
+[[ -n "$DK_GROUP" ]] && ARGS+=(--group "$DK_GROUP")
+ARGS+=(--notify "${NOTIFY:-all}")
 
 if ! (( DRY )); then
     DEPLOY_STAGE=upload
