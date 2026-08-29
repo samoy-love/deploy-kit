@@ -465,13 +465,29 @@ jobs:
         env:
           KIT_CONF: ${{ steps.cfg.outputs.nginx_conf }}
           REPO_CONF: ${{ inputs.nginx-conf }}
+          # РЕВИЗИЯ deploy-kit — ТА ЖЕ, ЧТО У ЭТОГО WORKFLOW, А НЕ ВЕРШИНА main.
+          #
+          # Проекты зовут пайплайн как @main, и это решение (см. комментарий у
+          # `uses:` в вызывающих): правки общего кита обязаны доезжать сразу и
+          # везде. Ревизия при этом разрешается ОДИН РАЗ, на старте job'а, —
+          # а curl уходит минутами позже и брал вершину main НА МОМЕНТ ШАГА.
+          # Мерж, попавший в этот промежуток, разводил половины одного коммита:
+          # workflow одной ревизии, скачанный им скрипт — другой.
+          #
+          # Ровно об этом предупреждает .github/actions/notify: «разъехавшиеся
+          # половины одного коммита нам уже стоили одного разбирательства».
+          # Там это решили тем, что файл едет вместе с действием; здесь —
+          # github.job_workflow_sha, то есть коммит ЭТОГО файла. Пиннинг
+          # проектов при этом не нужен: они по-прежнему на @main и получают
+          # правки следующим же прогоном.
+          KIT_REF: ${{ github.job_workflow_sha }}
         run: |
           if [ -n "$KIT_CONF" ]; then
             [ -n "$REPO_CONF" ] && echo "::warning::заданы и NGINX_CONF, и вход nginx-conf — беру NGINX_CONF ($KIT_CONF)"
             # Ссылка на main — тем же способом, что и ci/nginx-check.sh ниже:
             # reusable workflow вызывают как @main, и конфиг обязан приехать из
             # той же точки, что и проверяющий его скрипт.
-            curl -fsSL "https://raw.githubusercontent.com/tr0llex/deploy-kit/main/$KIT_CONF" -o /tmp/site.conf \
+            curl -fsSL "https://raw.githubusercontent.com/tr0llex/deploy-kit/${KIT_REF:-main}/$KIT_CONF" -o /tmp/site.conf \
               || { echo "::error::не удалось скачать $KIT_CONF из deploy-kit"; exit 1; }
             # Пустой файл curl считает успехом, а nginx — валидным конфигом:
             # выкатка бы прошла зелёной и оставила сайт без единого location.
@@ -489,8 +505,25 @@ jobs:
       - name: Проверить конфиг nginx
         id: nginxcheck
         if: steps.nginxsrc.outputs.path != ''
+        env:
+          # РЕВИЗИЯ deploy-kit — ТА ЖЕ, ЧТО У ЭТОГО WORKFLOW, А НЕ ВЕРШИНА main.
+          #
+          # Проекты зовут пайплайн как @main, и это решение (см. комментарий у
+          # `uses:` в вызывающих): правки общего кита обязаны доезжать сразу и
+          # везде. Ревизия при этом разрешается ОДИН РАЗ, на старте job'а, —
+          # а curl уходит минутами позже и брал вершину main НА МОМЕНТ ШАГА.
+          # Мерж, попавший в этот промежуток, разводил половины одного коммита:
+          # workflow одной ревизии, скачанный им скрипт — другой.
+          #
+          # Ровно об этом предупреждает .github/actions/notify: «разъехавшиеся
+          # половины одного коммита нам уже стоили одного разбирательства».
+          # Там это решили тем, что файл едет вместе с действием; здесь —
+          # github.job_workflow_sha, то есть коммит ЭТОГО файла. Пиннинг
+          # проектов при этом не нужен: они по-прежнему на @main и получают
+          # правки следующим же прогоном.
+          KIT_REF: ${{ github.job_workflow_sha }}
         run: |
-          curl -fsSL https://raw.githubusercontent.com/tr0llex/deploy-kit/main/ci/nginx-check.sh -o /tmp/nginx-check.sh \
+          curl -fsSL "https://raw.githubusercontent.com/tr0llex/deploy-kit/${KIT_REF:-main}/ci/nginx-check.sh" -o /tmp/nginx-check.sh \
             || { echo "::error::не удалось скачать ci/nginx-check.sh — ранняя проверка конфига невозможна"; exit 1; }
           bash /tmp/nginx-check.sh "${{ steps.nginxsrc.outputs.path }}"
 
@@ -544,6 +577,22 @@ jobs:
       - name: Собрать список изменений
         continue-on-error: true
         env:
+          # РЕВИЗИЯ deploy-kit — ТА ЖЕ, ЧТО У ЭТОГО WORKFLOW, А НЕ ВЕРШИНА main.
+          #
+          # Проекты зовут пайплайн как @main, и это решение (см. комментарий у
+          # `uses:` в вызывающих): правки общего кита обязаны доезжать сразу и
+          # везде. Ревизия при этом разрешается ОДИН РАЗ, на старте job'а, —
+          # а curl уходит минутами позже и брал вершину main НА МОМЕНТ ШАГА.
+          # Мерж, попавший в этот промежуток, разводил половины одного коммита:
+          # workflow одной ревизии, скачанный им скрипт — другой.
+          #
+          # Ровно об этом предупреждает .github/actions/notify: «разъехавшиеся
+          # половины одного коммита нам уже стоили одного разбирательства».
+          # Там это решили тем, что файл едет вместе с действием; здесь —
+          # github.job_workflow_sha, то есть коммит ЭТОГО файла. Пиннинг
+          # проектов при этом не нужен: они по-прежнему на @main и получают
+          # правки следующим же прогоном.
+          KIT_REF: ${{ github.job_workflow_sha }}
           # ЗАПАСНАЯ предыдущая ревизия, а больше не основная. Есть только у
           # push; на остальных событиях пусто — changelog сам откатится на тег
           # или на последние коммиты. Нули от первого пуша он тоже переживает.
@@ -658,7 +707,7 @@ jobs:
           fi
           # Качается оттуда же, откуда ci/nginx-check.sh, — один генератор на
           # все пути выкатки, чтобы лента релизов читалась одинаково.
-          if ! curl -fsSL https://raw.githubusercontent.com/tr0llex/deploy-kit/main/bin/changelog -o /tmp/changelog; then
+          if ! curl -fsSL "https://raw.githubusercontent.com/tr0llex/deploy-kit/${KIT_REF:-main}/bin/changelog" -o /tmp/changelog; then
             echo "::warning::bin/changelog не скачался — релиз уедет без списка изменений"
             exit 0
           fi

@@ -83,6 +83,17 @@ on:
         required: false
         type: string
         default: ''
+      allow-same-version:
+        # Осознанный повтор публикации той же версии с ДРУГОЙ сборкой. Обычно
+        # это ошибка («собрали новое, поднять версию забыли»), и шлюз в
+        # publish-file.sh её отвергает; вход существует ровно для случая, когда
+        # повтор нужен намеренно. Повтор ОДНОЙ И ТОЙ ЖЕ сборки флага не требует:
+        # публикация тогда просто ничего не делает и прогон идёт дальше — так
+        # перезапуск после провала самообновления и работает.
+        description: 'Разрешить ту же версию с другой сборкой'
+        required: false
+        type: boolean
+        default: false
       dry-run:
         # Сухой прогон СОБИРАЕТ, но не публикует. Входа здесь не было вовсе, и
         # это не мелочь: остальные архетипы его принимают, вызывающий пишет
@@ -560,6 +571,7 @@ jobs:
           APP: ${{ steps.cfg.outputs.event_app }}
           VERSION: ${{ steps.ver.outputs.version }}
           NOTIFY: ${{ steps.cfg.outputs.notify }}
+          ALLOW_SAME: ${{ inputs.allow-same-version }}
         run: |
           REMOTE_DIR="$(ssh -i ~/.ssh/deploy_key "$USER@$HOST" 'mktemp -d /tmp/dk-XXXXXXXXXX' | tr -d '\r' | tail -1)"
           case "$REMOTE_DIR" in
@@ -586,8 +598,21 @@ jobs:
           ARGS=(--file "$REMOTE_DIR/$BASE" --sha256 "$REMOTE_DIR/$BASE.sha256"
                 --dest "$UPLOAD_DEST" --app "$APP" --version "$VERSION"
                 --group "$GROUP" --notify "${NOTIFY:-all}")
+          [ "$ALLOW_SAME" = "true" ] && ARGS+=(--allow-same-version)
+          RC=0
           ssh -i ~/.ssh/deploy_key "$USER@$HOST" \
-            "sudo /opt/deploy-kit/publish-file.sh $(printf '%q ' "${ARGS[@]}")"
+            "sudo /opt/deploy-kit/publish-file.sh $(printf '%q ' "${ARGS[@]}")" || RC=$?
+          # Код 3 — отказ версионного шлюза цели-файла: прод не тронут, прежний
+          # файл и манифест на месте. Он уезжает выходом шага, чтобы «Стадия
+          # провала» назвала preflight, а не upload: доставка на сервер прошла,
+          # отказала проверка ДО подмены. Пишется ДО выхода — $GITHUB_OUTPUT
+          # раннер читает после шага независимо от его кода возврата.
+          echo "rc=$RC" >> "$GITHUB_OUTPUT"
+          if [ "$RC" = "3" ]; then
+            echo "::error::версия $VERSION уже опубликована с другой сборкой. Прод не тронут. Поднимите версию проекта либо запустите с allow-same-version"
+            exit 1
+          fi
+          [ "$RC" = "0" ] || exit "$RC"
 
       # «Зелёный деплой со старыми файлами» ловится именно здесь: сумма,
       # посчитанная на раннере, сверяется с той, что РАЗДАЁТ прод. Это тот же
@@ -645,8 +670,24 @@ jobs:
           # именем, под которым он в хозяйстве и лежит.
           ADMIN_USER: ${{ secrets.ADMIN_USER }}
           ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD_PLAIN }}
+          # РЕВИЗИЯ deploy-kit — ТА ЖЕ, ЧТО У ЭТОГО WORKFLOW, А НЕ ВЕРШИНА main.
+          #
+          # Проекты зовут пайплайн как @main, и это решение (см. комментарий у
+          # `uses:` в вызывающих): правки общего кита обязаны доезжать сразу и
+          # везде. Ревизия при этом разрешается ОДИН РАЗ, на старте job'а, —
+          # а curl уходит минутами позже и брал вершину main НА МОМЕНТ ШАГА.
+          # Мерж, попавший в этот промежуток, разводил половины одного коммита:
+          # workflow одной ревизии, скачанный им скрипт — другой.
+          #
+          # Ровно об этом предупреждает .github/actions/notify: «разъехавшиеся
+          # половины одного коммита нам уже стоили одного разбирательства».
+          # Там это решили тем, что файл едет вместе с действием; здесь —
+          # github.job_workflow_sha, то есть коммит ЭТОГО файла. Пиннинг
+          # проектов при этом не нужен: они по-прежнему на @main и получают
+          # правки следующим же прогоном.
+          KIT_REF: ${{ github.job_workflow_sha }}
         run: |
-          curl -fsSL https://raw.githubusercontent.com/tr0llex/deploy-kit/main/bin/selfupdate-upload -o /tmp/selfupdate-upload \
+          curl -fsSL "https://raw.githubusercontent.com/tr0llex/deploy-kit/${KIT_REF:-main}/bin/selfupdate-upload" -o /tmp/selfupdate-upload \
             || { echo "::error::не удалось скачать bin/selfupdate-upload из deploy-kit — сборка самообновления не уедет"; exit 1; }
           [ -s /tmp/selfupdate-upload ] || { echo "::error::bin/selfupdate-upload скачался пустым"; exit 1; }
           for ATTEMPT in 1 2 3 4 5 6; do
@@ -680,6 +721,7 @@ jobs:
           O_SUM: ${{ steps.sum.outcome }}
           O_UPLOAD: ${{ steps.upload.outcome }}
           O_VERIFY: ${{ steps.verify.outcome }}
+          UPLOAD_RC: ${{ steps.upload.outputs.rc }}
           O_SELFUPDATE: ${{ steps.selfupdate.outcome }}
         run: |
           # Порядок пар — порядок шагов. Пустой outcome значит «до шага не
@@ -708,6 +750,12 @@ jobs:
           # значения «неизвестно» в закрытом перечислении нет: preflight —
           # самое раннее из возможных и потому наименее лживое.
           [ -n "$STAGE" ] || STAGE=preflight
+          # Код 3 у публикации — версионный шлюз: прод не тронут, подмены не
+          # было. Контракт (§7) относит это к preflight, а не к upload, ровно
+          # как отказ шлюза у release.sh в остальных архетипах.
+          if [ "$STAGE" = "upload" ] && [ "${UPLOAD_RC:-}" = "3" ]; then
+            STAGE=preflight
+          fi
           echo "stage=$STAGE" >> "$GITHUB_OUTPUT"
           echo "Стадия провала: $STAGE"
 
@@ -773,6 +821,22 @@ jobs:
 
       - name: Список изменений
         env:
+          # РЕВИЗИЯ deploy-kit — ТА ЖЕ, ЧТО У ЭТОГО WORKFLOW, А НЕ ВЕРШИНА main.
+          #
+          # Проекты зовут пайплайн как @main, и это решение (см. комментарий у
+          # `uses:` в вызывающих): правки общего кита обязаны доезжать сразу и
+          # везде. Ревизия при этом разрешается ОДИН РАЗ, на старте job'а, —
+          # а curl уходит минутами позже и брал вершину main НА МОМЕНТ ШАГА.
+          # Мерж, попавший в этот промежуток, разводил половины одного коммита:
+          # workflow одной ревизии, скачанный им скрипт — другой.
+          #
+          # Ровно об этом предупреждает .github/actions/notify: «разъехавшиеся
+          # половины одного коммита нам уже стоили одного разбирательства».
+          # Там это решили тем, что файл едет вместе с действием; здесь —
+          # github.job_workflow_sha, то есть коммит ЭТОГО файла. Пиннинг
+          # проектов при этом не нужен: они по-прежнему на @main и получают
+          # правки следующим же прогоном.
+          KIT_REF: ${{ github.job_workflow_sha }}
           # Диапазон пуша. На остальных событиях пусто — генератор сам
           # откатится на тег или на последние коммиты.
           BEFORE: ${{ github.event_name == 'push' && github.event.before || '' }}
@@ -800,7 +864,7 @@ jobs:
           # список НИКОГДА — следующий отсчёт начнётся уже от следующего
           # пуша. Для установщика это терпимо (клиент катится реже сайта), но
           # молчаливой эту потерю оставлять нельзя.
-          if ! curl -fsSL https://raw.githubusercontent.com/tr0llex/deploy-kit/main/bin/changelog -o /tmp/changelog; then
+          if ! curl -fsSL "https://raw.githubusercontent.com/tr0llex/deploy-kit/${KIT_REF:-main}/bin/changelog" -o /tmp/changelog; then
             echo "::warning::bin/changelog не скачался — публикация уедет без списка изменений"
             exit 0
           fi
