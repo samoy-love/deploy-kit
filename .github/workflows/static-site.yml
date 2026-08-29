@@ -265,6 +265,7 @@ jobs:
             echo "health=${HEALTH:-}"
             echo "notify=${NOTIFY:-all}"
             echo "version_url=${VERSION_URL:-}"
+            echo "changelog_paths=${CHANGELOG_PATHS:-}"
             echo "neighbours=${NEIGHBOURS:-}"
             echo "nginx_reload=${NGINX_RELOAD:-0}"
             echo "nginx_conf=${NGINX_CONF:-}"
@@ -573,6 +574,17 @@ jobs:
           # /pull/N безопасно и тогда, когда номер оказался issue: GitHub
           # переадресует /pull/N ↔ /issues/N в обе стороны.
           LINK_BASE: ${{ github.server_url }}/${{ github.repository }}
+          # ЧТО ВЕЗЁТ ЦЕЛЬ. Список изменений считается по истории репозитория,
+          # а цель собирает артефакт из своего куска дерева. В монорепозитории
+          # это расходится: 22.08 карточка chillhub-site перечислила восемь PR
+          # при одном настоящем — остальные семь были про лаунчер, админку и
+          # установщик, потому что сайт не выкатывался с 16.08 и диапазон
+          # «прод → HEAD» накрыл шесть дней чужой работы.
+          #
+          # Пусто — прежнее поведение: вся история репозитория. Заполняет цель
+          # у себя (CHANGELOG_PATHS), потому что раскладку своего дерева знает
+          # только она.
+          TARGET_PATHS: ${{ steps.cfg.outputs.changelog_paths }}
         run: |
           # Файл существует ВСЕГДА, пусть и пустой: читающие шаги смотрят
           # только на его содержимое и не должны знать, дошло ли тут дело
@@ -696,7 +708,7 @@ jobs:
           # молча выпадет из проверки: неизвестный генератору флаг снова уедет
           # в прод, а стык останется зелёным.
           if ! DK_CHANGELOG_STATUS_FILE="$RANGE_FILE" timeout 180 bash /tmp/changelog \
-                 --repo "$GITHUB_WORKSPACE" --live "$LIVE" --since "${BEFORE:-}" --deepen --link-base "$LINK_BASE" --all > "$CHANGELOG_FILE"; then
+                 --repo "$GITHUB_WORKSPACE" --live "$LIVE" --since "${BEFORE:-}" --deepen --link-base "$LINK_BASE" --paths "${TARGET_PATHS:-}" --all > "$CHANGELOG_FILE"; then
             echo "::warning::генератор списка изменений не отработал — релиз уедет без него"
             : > "$CHANGELOG_FILE"
           fi
@@ -788,11 +800,29 @@ jobs:
         env:
           HOST: ${{ secrets.DEPLOY_HOST }}
           USER: ${{ secrets.DEPLOY_USER }}
+          APP: ${{ steps.cfg.outputs.app }}
+          ROOT: ${{ steps.cfg.outputs.root }}
+          UNIT: ${{ steps.cfg.outputs.unit }}
         run: |
+          # ЗНАЧЕНИЯ ОПИСАНИЯ ЦЕЛИ ЕДУТ ЧЕРЕЗ env И printf %q, А НЕ
+          # ПОДСТАНОВКОЙ ВЫРАЖЕНИЯ В РУЧНЫХ АПОСТРОФАХ.
+          #
+          # Так это и было написано: значение цели подставлялось выражением
+          # прямо внутрь одинарных кавычек команды.
+          # Значение приезжает из .deploy-kit/*.env репозитория проекта и
+          # становилось ЧАСТЬЮ ТЕКСТА команды, которую выполняет удалённый
+          # шелл под sudo. Одного апострофа в APP, ROOT или UNIT хватало,
+          # чтобы разорвать кавычки и получить вторую команду под учёткой с
+          # NOPASSWD на скрипты выкатки.
+          #
+          # bin/deploy эту же дыру у себя закрыл давно и оставил объяснение
+          # («Ручные одинарные кавычки тут были единственным местом…»), а
+          # переиспользуемый workflow тогда не поправили. printf %q даёт
+          # строку, которую чужой шелл разберёт ровно как одно слово.
+          ARGS=(--app "$APP" --root "$ROOT")
+          [ -n "$UNIT" ] && ARGS+=(--units "$UNIT")
           ssh -i ~/.ssh/deploy_key "$USER@$HOST" \
-            "sudo /opt/deploy-kit/preflight.sh --app '${{ steps.cfg.outputs.app }}' \
-               --root '${{ steps.cfg.outputs.root }}' \
-               ${{ steps.cfg.outputs.unit && format('--units ''{0}''', steps.cfg.outputs.unit) || '' }}"
+            "sudo /opt/deploy-kit/preflight.sh $(printf '%q ' "${ARGS[@]}")"
 
       # ИМЯ НА СЕРВЕРЕ — УНИКАЛЬНОЕ, А НЕ /tmp/site.conf.
       #
@@ -819,6 +849,9 @@ jobs:
           HOST: ${{ secrets.DEPLOY_HOST }}
           USER: ${{ secrets.DEPLOY_USER }}
           NGINX_CONF: ${{ steps.nginxsrc.outputs.path }}
+          APP: ${{ steps.cfg.outputs.app }}
+          NGINX_DEST: ${{ steps.cfg.outputs.nginx_dest }}
+          DRY: ${{ inputs.dry-run }}
         run: |
           REMOTE_DIR="$(ssh -i ~/.ssh/deploy_key "$USER@$HOST" 'mktemp -d /tmp/dk-XXXXXXXXXX' | tr -d '\r' | tail -1)"
           case "$REMOTE_DIR" in
@@ -828,16 +861,32 @@ jobs:
           trap 'ssh -i ~/.ssh/deploy_key "$USER@$HOST" "rm -rf -- $REMOTE_DIR" || true' EXIT
 
           scp -i ~/.ssh/deploy_key "$NGINX_CONF" "$USER@$HOST:$REMOTE_DIR/site.conf"
+          # Через env и printf %q — по той же причине, что и в предусловиях
+          # выше: NGINX_DEST приезжает из описания цели и уезжает в командную
+          # строку root'а, которая ставит файл в /etc/nginx.
+          ARGS=(--app "$APP" --conf "$REMOTE_DIR/site.conf" --dest "$NGINX_DEST" --enable)
+          [ "$DRY" = "true" ] && ARGS+=(--dry-run)
           ssh -i ~/.ssh/deploy_key "$USER@$HOST" \
-            "sudo /opt/deploy-kit/nginx-apply.sh --app '${{ steps.cfg.outputs.app }}' \
-               --conf '$REMOTE_DIR/site.conf' --dest '${{ steps.cfg.outputs.nginx_dest }}' --enable \
-               ${{ inputs.dry-run && '--dry-run' || '' }}"
+            "sudo /opt/deploy-kit/nginx-apply.sh $(printf '%q ' "${ARGS[@]}")"
 
       - name: Выкатить
         id: release
         env:
           HOST: ${{ secrets.DEPLOY_HOST }}
           USER: ${{ secrets.DEPLOY_USER }}
+          APP: ${{ steps.cfg.outputs.app }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          ROOT: ${{ steps.cfg.outputs.root }}
+          OWNER: ${{ steps.cfg.outputs.owner }}
+          UNIT: ${{ steps.cfg.outputs.unit }}
+          HEALTH: ${{ steps.cfg.outputs.health }}
+          VERSION_URL: ${{ steps.cfg.outputs.version_url }}
+          NEIGHBOURS: ${{ steps.cfg.outputs.neighbours }}
+          NGINX_RELOAD: ${{ steps.cfg.outputs.nginx_reload }}
+          WRITE_VERSION_FILE: ${{ steps.cfg.outputs.write_version_file }}
+          NOTIFY: ${{ steps.cfg.outputs.notify }}
+          ALLOW_SAME: ${{ inputs.allow-same-version }}
+          DRY: ${{ inputs.dry-run }}
         run: |
           # Архив кладётся в приватный каталог, а не прямо в /tmp.
           #
@@ -859,23 +908,47 @@ jobs:
           esac
           trap 'ssh -i ~/.ssh/deploy_key "$USER@$HOST" "rm -rf -- $REMOTE_DIR" || true' EXIT
 
-          REMOTE="$REMOTE_DIR/${{ steps.cfg.outputs.app }}-${{ steps.ver.outputs.version }}.tar.gz"
+          REMOTE="$REMOTE_DIR/$APP-$VERSION.tar.gz"
           scp -i ~/.ssh/deploy_key /tmp/artifact.tar.gz "$USER@$HOST:$REMOTE"
 
-          ARGS="--app '${{ steps.cfg.outputs.app }}' --version '${{ steps.ver.outputs.version }}'"
-          ARGS="$ARGS --archive '$REMOTE' --root '${{ steps.cfg.outputs.root }}'"
-          [ -n "${{ steps.cfg.outputs.owner }}" ]       && ARGS="$ARGS --owner '${{ steps.cfg.outputs.owner }}'"
-          [ -n "${{ steps.cfg.outputs.unit }}" ]        && ARGS="$ARGS --unit '${{ steps.cfg.outputs.unit }}'"
-          [ -n "${{ steps.cfg.outputs.health }}" ]      && ARGS="$ARGS --health '${{ steps.cfg.outputs.health }}'"
-          [ -n "${{ steps.cfg.outputs.version_url }}" ] && ARGS="$ARGS --version-url '${{ steps.cfg.outputs.version_url }}'"
-          [ -n "${{ steps.cfg.outputs.neighbours }}" ]  && ARGS="$ARGS --neighbours '${{ steps.cfg.outputs.neighbours }}'"
-          [ "${{ steps.cfg.outputs.nginx_reload }}" = "1" ] && ARGS="$ARGS --nginx-reload"
-          [ "${{ steps.cfg.outputs.write_version_file }}" = "0" ] && ARGS="$ARGS --no-version-file"
-          ${{ inputs.allow-same-version && 'ARGS="$ARGS --allow-same-version"' || 'true' }}
-          ${{ inputs.dry-run && 'ARGS="$ARGS --dry-run"' || 'true' }}
+          # АРГУМЕНТЫ — МАССИВОМ И ЧЕРЕЗ printf %q, а не склейкой строки с
+          # ручными апострофами. Причина та же, что в шаге «Предусловия на
+          # хосте» выше: значения приезжают из описания цели в репозитории
+          # проекта и уезжают в командную строку, которую выполняет root.
+          ARGS=(--app "$APP" --version "$VERSION" --archive "$REMOTE" --root "$ROOT")
+          [ -n "$OWNER" ]       && ARGS+=(--owner "$OWNER")
+          [ -n "$UNIT" ]        && ARGS+=(--unit "$UNIT")
+          [ -n "$HEALTH" ]      && ARGS+=(--health "$HEALTH")
+          [ -n "$VERSION_URL" ] && ARGS+=(--version-url "$VERSION_URL")
+          [ -n "$NEIGHBOURS" ]  && ARGS+=(--neighbours "$NEIGHBOURS")
+          [ "$NGINX_RELOAD" = "1" ]       && ARGS+=(--nginx-reload)
+          [ "$WRITE_VERSION_FILE" = "0" ] && ARGS+=(--no-version-file)
+          [ "$ALLOW_SAME" = "true" ]      && ARGS+=(--allow-same-version)
+          [ "$DRY" = "true" ]             && ARGS+=(--dry-run)
+
+          # ГРУППА ПРОГОНА И ПРАВИЛО NOTIFY УЕЗЖАЮТ НА СЕРВЕР ВМЕСТЕ С ВЫКАТКОЙ.
+          #
+          # release.sh объявляет исход своим событием — он единственный, кто
+          # видит автооткат и его причину. Но группы прогона он не знал, и
+          # notify.sh на сервере считал её сам: source=local, hostname сервера,
+          # свой pid. Группа не совпадала с группой этого прогона НИКОГДА, а по
+          # §6 контракта незнакомая группа — это новое сообщение. Одна выкатка
+          # объявлялась в чате дважды: карточкой прогона отсюда и отдельным
+          # сообщением от сервера.
+          #
+          # Прообраз — ровно тот, что §6 предписывает для CI, и тот же, что
+          # считает lib/notify.sh: repo, run_id и attempt через «|», без
+          # перевода строки в конце. Второй реализации sha256 здесь не
+          # заводится — это те же три величины, а не другая правда о прогоне.
+          #
+          # NOTIFY передаётся по той же причине: цель с NOTIFY=never просила
+          # молчать, но серверные события уезжали в чат мимо настройки.
+          GROUP="$(printf '%s|%s|%s' "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "${GITHUB_RUN_ATTEMPT:-1}" | sha256sum | cut -d' ' -f1)"
+          ARGS+=(--group "$GROUP" --notify "${NOTIFY:-all}")
 
           RC=0
-          ssh -i ~/.ssh/deploy_key "$USER@$HOST" "sudo /opt/deploy-kit/release.sh $ARGS" || RC=$?
+          ssh -i ~/.ssh/deploy_key "$USER@$HOST" \
+            "sudo /opt/deploy-kit/release.sh $(printf '%q ' "${ARGS[@]}")" || RC=$?
           # Код release.sh уезжает выходом шага: по нему шаг «Стадия провала»
           # отличает отказ версионного шлюза (прод не тронут — это preflight)
           # от всего остального. Пишется ДО выхода: $GITHUB_OUTPUT раннер
@@ -884,7 +957,7 @@ jobs:
           # Код 3 — отказ версионного шлюза: прод не тронут. Отдельная
           # формулировка нужна, чтобы в логе была причина, а не «job failed».
           if [ "$RC" = "3" ]; then
-            echo "::error::версия ${{ steps.ver.outputs.version }} не прошла версионный шлюз (уже на проде, старше прода или несравнима). Прод не тронут. Осознанный повтор — запуск с allow-same-version"
+            echo "::error::версия $VERSION не прошла версионный шлюз (уже на проде, старше прода или несравнима). Прод не тронут. Осознанный повтор — запуск с allow-same-version"
             exit 1
           fi
           [ "$RC" = "0" ] || exit "$RC"
