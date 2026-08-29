@@ -952,8 +952,19 @@ if (( PUBLISH_MODE )); then
     PUB_ARGS=(--file "$REMOTE_TMP/$BASE" --sha256 "$REMOTE_TMP/$BASE.sha256" --dest "$PUBLISH_DEST"
               --app "$APP" --version "$VERSION" --notify "${NOTIFY:-all}")
     [[ -n "$DK_GROUP" ]] && PUB_ARGS+=(--group "$DK_GROUP")
-    "${SSH[@]}" "sudo /opt/deploy-kit/publish-file.sh $(printf '%q ' "${PUB_ARGS[@]}")" \
-        || die "публикация $APP провалена — на сервере остался прежний файл"
+    (( ALLOW_SAME )) && PUB_ARGS+=(--allow-same-version)
+    # Код 3 — отказ версионного шлюза цели-файла: прод не тронут, прежний файл
+    # и манифест на месте. Отличать его от поломки обязательно, иначе на месте
+    # внятной причины остаётся «упало непонятно почему» и следом попытка чинить
+    # работающий сервер. Так же разбирается код 3 у release.sh ниже.
+    PRC=0
+    "${SSH[@]}" "sudo /opt/deploy-kit/publish-file.sh $(printf '%q ' "${PUB_ARGS[@]}")" || PRC=$?
+    if (( PRC == 3 )); then
+        DEPLOY_STAGE=preflight
+        die "публикация $APP отменена шлюзом (см. сообщение выше) — на сервере остался прежний файл"
+    elif (( PRC != 0 )); then
+        die "публикация $APP провалена — на сервере остался прежний файл"
+    fi
 
     # Сверка суммы с прода — это ровно то же, что сверка /version.json у
     # обычной цели: «зелёный деплой со старыми файлами» ловится здесь.
