@@ -13,6 +13,14 @@
 #                   --sha256 /tmp/dk-XXX/ChillHub-Setup.exe.sha256 \
 #                   --dest   /var/www/site-downloads/ChillHub-Setup.exe
 #
+# Событие о выкатке (docs/events.md):
+#   --group <64 hex>       группа прогона: одна команда владельца или один
+#                          прогон CI — одно сообщение в чате. Не передали —
+#                          событие заведёт свою группу и объявит выкатку
+#                          вторым сообщением поверх карточки прогона
+#   --notify all|fail|never  что цель разрешает говорить; то же NOTIFY, что
+#                          читает сторона CI. Умолчание all
+#
 # Что делает:
 #   1. сверяет файл с приехавшей рядом контрольной суммой (обрыв scp не должен
 #      доехать до пользователей);
@@ -47,6 +55,12 @@ while [[ $# -gt 0 ]]; do
         # просто молча.
         --app)     APP="$2"; shift 2 ;;
         --version) VERSION="$2"; shift 2 ;;
+        # Группа прогона и правило NOTIFY — общие для всех серверных
+        # скриптов, разбор в server/lib.sh. Без --group событие заводит свою
+        # группу и объявляет выкатку ВТОРЫМ сообщением поверх карточки
+        # прогона; без --notify цель с NOTIFY=never говорит вопреки просьбе.
+        --group)       dk_set_group "${2:-}"; shift 2 ;;
+        --notify)      dk_set_notify "${2:-}"; shift 2 ;;
         # Незнакомый флаг — не повод падать: пайплайн обновляется сам
         # (uses: ...@main), а этот скрипт живёт на хосте и отстаёт.
         *) warn "неизвестный аргумент, пропускаю: $1"; shift ;;
@@ -72,32 +86,8 @@ DEST="$DESTDIR/$BASE"
 [[ -z "$APP" ]]     || assert_path_component "--app" "$APP"
 [[ -z "$VERSION" ]] || assert_path_component "--version" "$VERSION"
 
-# Событие публикации. Обоснование защиты — в шапке notify_event в release.sh:
-# отдельный процесс, timeout, гашение любого кода возврата. Файл здесь уже
-# опубликован, и уведомление не имеет права превратить успех в ошибку.
-DK_NOTIFY="${DK_NOTIFY:-}"
-if [[ -z "$DK_NOTIFY" ]]; then
-    _dk_dir="$(dirname "${BASH_SOURCE[0]}")"
-    if   [[ -f "$_dk_dir/notify.sh" ]];        then DK_NOTIFY="$_dk_dir/notify.sh"
-    elif [[ -f "$_dk_dir/../lib/notify.sh" ]]; then DK_NOTIFY="$_dk_dir/../lib/notify.sh"
-    fi
-fi
-
-notify_event() {
-    if [[ ! -f "$DK_NOTIFY" ]]; then
-        log "notify.sh не найден — событие «$*» не отправлено"
-        return 0
-    fi
-    # Вызов идёт УЖЕ на сервере — доставать себя же по SSH незачем, событие
-    # просто дописывается в журнал напрямую. Без --mode notify.sh молча берёт
-    # умолчание "ssh" и требует --host, которого здесь никогда не будет.
-    if command -v timeout >/dev/null 2>&1; then
-        timeout 30 bash "$DK_NOTIFY" --mode local "$@" </dev/null || warn "событие не отправлено (код $?): $*"
-    else
-        bash "$DK_NOTIFY" --mode local "$@" </dev/null || warn "событие не отправлено (код $?): $*"
-    fi
-    return 0
-}
+# Событие публикации собирает и доставляет notify_event (server/lib.sh): одна
+# реализация на все серверные скрипты, обоснование защиты — там же.
 
 log "публикую $BASE в $DESTDIR"
 
