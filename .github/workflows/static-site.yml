@@ -79,7 +79,7 @@ concurrency:
 
 jobs:
   deploy:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
       # Список изменений собирается ОДИН раз и лежит здесь до конца job'а: его

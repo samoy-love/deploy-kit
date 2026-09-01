@@ -82,7 +82,7 @@ concurrency:
 
 jobs:
   deploy:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       # Список изменений собирается ОДИН раз и лежит здесь до конца job'а: его
@@ -211,7 +211,7 @@ jobs:
             echo "version_url=${VERSION_URL:-}"
             echo "changelog_paths=${CHANGELOG_PATHS:-}"
             echo "neighbours=${NEIGHBOURS:-}"
-            echo "goarch=${GOARCH:-amd64}"
+            echo "goarch=${GOARCH:-arm64}"
             echo "nginx_conf=${NGINX_CONF:-}"
             echo "nginx_dest=${NGINX_DEST:-}"
             # NGINX_RELOAD, в отличие от static-site, отсюда не уезжает: там он
