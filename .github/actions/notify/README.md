@@ -37,7 +37,7 @@
 одного workflow, а вызов переиспользуемого workflow своего прогона не заводит —
 его задачи принадлежат прогону вызывающего, и `run_id` с `run_attempt` у них
 общие. `github.repository` внутри вызываемого workflow — это репозиторий
-вызывающего (`tr0llex/chillhub`, а не `tr0llex/deploy-kit`), то есть ровно то,
+вызывающего (`tr0llex/chillhub`, а не `samoy-love/deploy-kit`), то есть ровно то,
 что нужно ключу группы.
 
 Граница у этого одна: цели, разведённые по **разным workflow**, попадут в
@@ -64,7 +64,7 @@
 
       - name: Событие — выкатка началась
         if: ${{ !inputs.dry-run }}
-        uses: tr0llex/deploy-kit/.github/actions/notify@main
+        uses: samoy-love/deploy-kit/.github/actions/notify@main
         with:
           app: ${{ steps.cfg.outputs.app }}
           kind: started
@@ -80,7 +80,7 @@
       # события, и рано или поздно они разойдутся.
       - name: Событие — исход выкатки
         if: always() && !inputs.dry-run
-        uses: tr0llex/deploy-kit/.github/actions/notify@main
+        uses: samoy-love/deploy-kit/.github/actions/notify@main
         with:
           app: ${{ steps.cfg.outputs.app }}
           kind: ${{ job.status == 'success' && 'success' || 'failure' }}
