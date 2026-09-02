@@ -102,7 +102,7 @@ else
     # запуска.
     kit_nginx="$(cd "$(dirname "$0")/../nginx" 2>/dev/null && pwd || true)"
     if [[ ! -d "$kit_nginx/conf.d" || ! -d "$kit_nginx/snippets" ]]; then
-        kit_repo="${DEPLOY_KIT_REPO:-tr0llex/deploy-kit}"
+        kit_repo="${DEPLOY_KIT_REPO:-samoy-love/deploy-kit}"
         kit_ref="${DEPLOY_KIT_REF:-main}"
         kit_tmp="$(mktemp -d)"
         trap 'rm -rf "$kit_tmp"' EXIT

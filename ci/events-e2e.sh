@@ -184,7 +184,7 @@ check_against_golden() { # check_against_golden <имя случая> <файл>
 case_ "Выкатка из пайплайна ложится в журнал ровно образцом example-success"
 
 new_dir success
-GROUP_SUCCESS="$(sha 'tr0llex/snakes|16542330981|1')"
+GROUP_SUCCESS="$(sha 'samoy-love/snakes|16542330981|1')"
 seed_group "$GROUP_SUCCESS" 1
 cat >"$TMP/cl-success" <<'CL'
 Не выдавать недоставленное уведомление за успех
@@ -192,7 +192,7 @@ cat >"$TMP/cl-success" <<'CL'
 Починить обрыв скачивания больших файлов #21
 CL
 run env DK_TEST_FIXED_MS=1785924102123 \
-    GITHUB_ACTIONS=true GITHUB_REPOSITORY=tr0llex/snakes \
+    GITHUB_ACTIONS=true GITHUB_REPOSITORY=samoy-love/snakes \
     GITHUB_RUN_ID=16542330981 GITHUB_RUN_ATTEMPT=1 \
     bash "$NOTIFY" --mode local --events-dir "$DIR" \
     --kind success --app snakes \
@@ -200,8 +200,8 @@ run env DK_TEST_FIXED_MS=1785924102123 \
     --version release-20260805-130115-1a2b3c4 \
     --previous release-20260804-221407-9f8e7d6 \
     --changelog-file "$TMP/cl-success" \
-    --commit-url https://github.com/tr0llex/snakes/commit/1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d \
-    --run-url https://github.com/tr0llex/snakes/actions/runs/16542330981/attempts/1
+    --commit-url https://github.com/samoy-love/snakes/commit/1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d \
+    --run-url https://github.com/samoy-love/snakes/actions/runs/16542330981/attempts/1
 
 same "код возврата" "$RC" "0"
 same "имя файла" "$(event_names | head -1)" "1785924102123-snakes-success.json"
@@ -210,7 +210,7 @@ check_against_golden "выкатка" "$DIR/1785924102123-snakes-success.json" "
 # id и group — настоящие sha256 от прообразов §5 и §6. Пересчитываются здесь, а
 # не сверяются с константой в теле теста: константа разъедется с контрактом так
 # же тихо, как разъехались бы обе стороны конвейера.
-grep -qF "\"id\": \"$(sha 'tr0llex/snakes|16542330981|1|snakes|success')\"" \
+grep -qF "\"id\": \"$(sha 'samoy-love/snakes|16542330981|1|snakes|success')\"" \
     "$DIR/1785924102123-snakes-success.json" \
     && ok "id — sha256 от прообраза §5" || bad "id не совпал с пересчитанным прообразом §5"
 grep -qF "\"group\": \"$GROUP_SUCCESS\"" "$DIR/1785924102123-snakes-success.json" \
@@ -221,13 +221,13 @@ case_ "Провал на гейтах ложится образцом example-fa
 
 new_dir failure
 run env DK_TEST_FIXED_MS=1785923700456 \
-    GITHUB_ACTIONS=true GITHUB_REPOSITORY=tr0llex/chillhub \
+    GITHUB_ACTIONS=true GITHUB_REPOSITORY=samoy-love/chillhub \
     GITHUB_RUN_ID=16542331744 GITHUB_RUN_ATTEMPT=2 \
     bash "$NOTIFY" --mode local --events-dir "$DIR" \
     --kind failure --app chillhub-site --stage gates \
     --at 2026-08-05T09:55:00Z \
-    --commit-url https://github.com/tr0llex/chillhub/commit/7f8e9d0c1b2a394857661a2b3c4d5e6f708192a3 \
-    --run-url https://github.com/tr0llex/chillhub/actions/runs/16542331744/attempts/2
+    --commit-url https://github.com/samoy-love/chillhub/commit/7f8e9d0c1b2a394857661a2b3c4d5e6f708192a3 \
+    --run-url https://github.com/samoy-love/chillhub/actions/runs/16542331744/attempts/2
 
 same "код возврата" "$RC" "0"
 check_against_golden "провал" "$DIR/1785923700456-chillhub-site-failure.json" "$GOLDEN/example-failure.json"
@@ -248,7 +248,7 @@ run env DK_TEST_FIXED_MS=1785925215123 DK_TEST_HOSTNAME=samoy-love \
     --previous manual-20260803-201155-b1a2c3d \
     --stage health --reason health_failed \
     --changelog-file "$TMP/cl-metro" \
-    --commit-url https://github.com/tr0llex/metro-map/commit/c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7
+    --commit-url https://github.com/samoy-love/metro-map/commit/c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7
 
 same "код возврата" "$RC" "0"
 check_against_golden "автооткат" "$DIR/1785925215123-metro-rolled_back.json" "$GOLDEN/example-rolled-back.json"

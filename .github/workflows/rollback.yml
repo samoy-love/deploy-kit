@@ -48,7 +48,7 @@ name: rollback
 #     contents: read
 #   jobs:
 #     rollback:
-#       uses: tr0llex/deploy-kit/.github/workflows/rollback.yml@main
+#       uses: samoy-love/deploy-kit/.github/workflows/rollback.yml@main
 #       with:
 #         config: ${{ inputs.config }}
 #         to: ${{ inputs.to }}

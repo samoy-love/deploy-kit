@@ -2,7 +2,7 @@
 
 [Русский](README.md) · English
 
-[![CI](https://github.com/tr0llex/deploy-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/tr0llex/deploy-kit/actions/workflows/ci.yml)
+[![CI](https://github.com/samoy-love/deploy-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/samoy-love/deploy-kit/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![nginx 1.24](https://img.shields.io/badge/nginx-1.24-009639)
 
@@ -208,7 +208,7 @@ Running it by hand:
 bash bin/changelog --repo .                       # what has been going on lately
 bash bin/changelog --repo . --since v1.4.0 --max 6
 bash bin/changelog --repo . --max 0 --budget 0    # the whole release, as in version.json
-bash bin/changelog --repo . --link-base https://github.com/tr0llex/deploy-kit
+bash bin/changelog --repo . --link-base https://github.com/samoy-love/deploy-kit
 ```
 
 Through `bash` rather than by executing the file: this repository has
@@ -292,7 +292,7 @@ A project repository keeps a workflow call:
 ```yaml
 jobs:
   deploy:
-    uses: tr0llex/deploy-kit/.github/workflows/static-site.yml@main
+    uses: samoy-love/deploy-kit/.github/workflows/static-site.yml@main
     with:
       config: .deploy-kit/prod.env
       gates: npm ci && npm run test:coverage && npm run build
@@ -397,15 +397,15 @@ Current targets:
 
 | Target | Archetype | Repository |
 |---|---|---|
-| samoy.love | static-site | [samoy.love](https://github.com/tr0llex/samoy.love) |
-| metro.samoy.love | static-site | [metro-map](https://github.com/tr0llex/metro-map) |
-| launcher.samoy.love, admin UI | static-site | [chillhub](https://github.com/tr0llex/chillhub) |
-| launcher and admin servers | go-service | [chillhub](https://github.com/tr0llex/chillhub) |
-| ChillHub installer | desktop-artifact | [chillhub](https://github.com/tr0llex/chillhub) |
-| Snakes server and client | go-service | [snakes](https://github.com/tr0llex/snakes) |
-| status.samoy.love, its agent and status Telegram bot | static-site + go-service | [status.samoy.love](https://github.com/tr0llex/status.samoy.love) |
-| die.samoy.love                     | static-site | [double-or-die](https://github.com/tr0llex/double-or-die) |
-| Monitoring stack (Prometheus, Grafana) | compose stack via systemd unit | [metrics.samoy.love](https://github.com/tr0llex/metrics.samoy.love) |
+| samoy.love | static-site | [samoy.love](https://github.com/samoy-love/samoy.love) |
+| metro.samoy.love | static-site | [metro-map](https://github.com/samoy-love/metro-map) |
+| launcher.samoy.love, admin UI | static-site | [chillhub](https://github.com/samoy-love/chillhub) |
+| launcher and admin servers | go-service | [chillhub](https://github.com/samoy-love/chillhub) |
+| ChillHub installer | desktop-artifact | [chillhub](https://github.com/samoy-love/chillhub) |
+| Snakes server and client | go-service | [snakes](https://github.com/samoy-love/snakes) |
+| status.samoy.love, its agent and status Telegram bot | static-site + go-service | [status.samoy.love](https://github.com/samoy-love/status.samoy.love) |
+| die.samoy.love                     | static-site | [double-or-die](https://github.com/samoy-love/double-or-die) |
+| Monitoring stack (Prometheus, Grafana) | compose stack via systemd unit | [metrics.samoy.love](https://github.com/samoy-love/metrics.samoy.love) |
 
 The Snakes client ships in **one artifact** with its server: they share a
 binary protocol, and versions drifting apart break packet parsing.
@@ -438,13 +438,13 @@ One domain, one server, one pipeline, one status page, one monitoring stack.
 
 | Project | What it is |
 |---|---|
-| [samoy.love](https://github.com/tr0llex/samoy.love) | Homepage and project showcase: Astro, WebGL background, zero trackers |
-| [chillhub](https://github.com/tr0llex/chillhub) | ChillHub — Windows game launcher: diff updates, hash control, Go admin panel |
-| [snakes](https://github.com/tr0llex/snakes) | Browser territory-capture multiplayer: Go, WebSocket, binary protocol |
-| [metro-map](https://github.com/tr0llex/metro-map) | Offline PWA with the Moscow metro map: routing on the client, Canvas 2D |
-| [status.samoy.love](https://github.com/tr0llex/status.samoy.love) | Status page: uptime, versions, incidents; Go agent plus an external watchdog |
-| [metrics.samoy.love](https://github.com/tr0llex/metrics.samoy.love) | Monitoring and product analytics: Prometheus, Grafana, traffic from nginx logs |
-| [deploy-kit](https://github.com/tr0llex/deploy-kit) | This repository: the shared release pipeline |
+| [samoy.love](https://github.com/samoy-love/samoy.love) | Homepage and project showcase: Astro, WebGL background, zero trackers |
+| [chillhub](https://github.com/samoy-love/chillhub) | ChillHub — Windows game launcher: diff updates, hash control, Go admin panel |
+| [snakes](https://github.com/samoy-love/snakes) | Browser territory-capture multiplayer: Go, WebSocket, binary protocol |
+| [metro-map](https://github.com/samoy-love/metro-map) | Offline PWA with the Moscow metro map: routing on the client, Canvas 2D |
+| [status.samoy.love](https://github.com/samoy-love/status.samoy.love) | Status page: uptime, versions, incidents; Go agent plus an external watchdog |
+| [metrics.samoy.love](https://github.com/samoy-love/metrics.samoy.love) | Monitoring and product analytics: Prometheus, Grafana, traffic from nginx logs |
+| [deploy-kit](https://github.com/samoy-love/deploy-kit) | This repository: the shared release pipeline |
 
 ## Contacts
 

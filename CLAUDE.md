@@ -76,7 +76,7 @@ git config core.hooksPath .githooks
 
 ## Выкатка
 
-Единственный путь — [deploy-kit](https://github.com/tr0llex/deploy-kit).
+Единственный путь — [deploy-kit](https://github.com/samoy-love/deploy-kit).
 Своих скриптов деплоя в проектах нет.
 
 ```bash

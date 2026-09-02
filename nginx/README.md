@@ -39,7 +39,7 @@ conf.d/     то, что обязано жить на уровне http (фор�
 `conf.d/samoylove-log-metrics.conf` объявляет формат `samoylove_metrics`, а
 конфиги сайтов пишут им второй журнал
 `/var/log/nginx/samoylove_metrics.log`. Его читает экспортёр из
-[metrics.samoy.love](https://github.com/tr0llex/metrics.samoy.love).
+[metrics.samoy.love](https://github.com/samoy-love/metrics.samoy.love).
 
 В формате намеренно **нет** IP, User-Agent, Referer и строки запроса: только
 домен, метод, путь, код, объём и время ответа. Строку, которой не существует,

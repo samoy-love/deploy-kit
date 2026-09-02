@@ -5,7 +5,7 @@
 #   changelog --since release-20260801-1a2b3c4   от предыдущего релиза
 #   changelog --since v1.4.0 --max 6 --width 90
 #   changelog --repo ../samoylove --no-header
-#   changelog --link-base https://github.com/tr0llex/deploy-kit  со ссылками на PR
+#   changelog --link-base https://github.com/samoy-love/deploy-kit  со ссылками на PR
 #   changelog --since v1.4.0 --all        весь список, для version.json
 #                                         (то же, что --max 0 --budget 0)
 #
@@ -150,7 +150,7 @@
 #
 # ССЫЛКА НА PR ВМЕСТО СРЕЗАННОГО НОМЕРА (--link-base, по умолчанию ВЫКЛЮЧЕНО).
 # Срезать номер целиком — тоже потеря: из чата к обсуждению изменения не
-# перейти. Если передать базу — «--link-base https://github.com/tr0llex/deploy-kit»
+# перейти. Если передать базу — «--link-base https://github.com/samoy-love/deploy-kit»
 # — срезанный «(#21)» возвращается в конец пункта уже ссылкой:
 #
 #   • Завести dependabot одинаково во всех репозиториях <a href="…/pull/21">#21</a>
@@ -213,7 +213,7 @@
 #                                         одного из них, в список не попадают.
 #                                         Пусто — вся история репозитория
 #   --link-base <url> DK_CHANGELOG_LINK_BASE  база ссылки на PR, например
-#                                         https://github.com/tr0llex/deploy-kit;
+#                                         https://github.com/samoy-love/deploy-kit;
 #                                         пусто — номер просто срезается, как
 #                                         и раньше
 #   --all           —                     снять оба предела: то же самое, что

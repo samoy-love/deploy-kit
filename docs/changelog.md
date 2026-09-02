@@ -64,7 +64,7 @@ Actions коммит не выпадает из ленты навсегда. П�
 | `--depth` | 8 | сколько коммитов берёт запасной вариант |
 | `--budget` | 1200 | символов на весь блок; `0` — без предела (потолок 20000) |
 | `--all` | — | снять оба предела: то же, что `--max 0 --budget 0` |
-| `--link-base` | не задано | база ссылок на PR, например `https://github.com/tr0llex/deploy-kit` |
+| `--link-base` | не задано | база ссылок на PR, например `https://github.com/samoy-love/deploy-kit` |
 | `--no-header` | заголовок есть | убрать строку `<b>Изменения</b>` |
 | `--quiet` | — | не объяснять выбор диапазона в stderr |
 
@@ -150,7 +150,7 @@ main с темой-заголовком PR, и такой хвост несут 
 Поэтому с `--link-base` он возвращается в конец пункта уже ссылкой:
 
 ```html
-• Завести dependabot одинаково во всех репозиториях <a href="https://github.com/tr0llex/deploy-kit/pull/21">#21</a>
+• Завести dependabot одинаково во всех репозиториях <a href="https://github.com/samoy-love/deploy-kit/pull/21">#21</a>
 ```
 
 Читатель видит те же четыре символа `#21`, но по ним можно уйти в сам PR.
@@ -213,7 +213,7 @@ stderr, а пункт выдаётся в прежней форме, без те
   "version": "release-20260803-120000-1a2b3c4",
   "commit": "1a2b3c4",
   "builtAt": "2026-08-03T12:00:00+03:00",
-  "changelog": "<b>Изменения</b>\n• исправить падение на пустом конфиге\n• обновить nginx до 1.24 <a href=\"https://github.com/tr0llex/deploy-kit/pull/21\">#21</a>"
+  "changelog": "<b>Изменения</b>\n• исправить падение на пустом конфиге\n• обновить nginx до 1.24 <a href=\"https://github.com/samoy-love/deploy-kit/pull/21\">#21</a>"
 }
 ```
 
@@ -268,7 +268,7 @@ HTTP тем же сервером, что и сам сервис, — иначе
 bash bin/changelog --repo .                       # что тут недавно делали
 bash bin/changelog --repo . --since v1.4.0 --max 6
 bash bin/changelog --repo . --max 0 --budget 0    # весь релиз, как в version.json
-bash bin/changelog --repo . --link-base https://github.com/tr0llex/deploy-kit
+bash bin/changelog --repo . --link-base https://github.com/samoy-love/deploy-kit
 ```
 
 Через `bash`, а не запуском файла: в этом репозитории `core.filemode=false`, и

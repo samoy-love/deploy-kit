@@ -34,7 +34,7 @@
 #                                  изменений считается только по этим путям.
 #                                  Пусто — вся история репозитория (годится
 #                                  проекту из одной цели, врёт в монорепо)
-#   LINK_BASE=https://github.com/tr0llex/deploy-kit   база ссылок на PR в
+#   LINK_BASE=https://github.com/samoy-love/deploy-kit   база ссылок на PR в
 #                                  списке изменений. Пусто — вывести из
 #                                  `git remote get-url origin`; none — не
 #                                  ставить ссылок вовсе.
@@ -373,9 +373,9 @@ fi
 # что обе — норма: ssh ставится по умолчанию `gh repo clone`, https — кнопкой
 # «Clone» на сайте, и в одном хозяйстве живут вперемешку.
 #
-#   git@github.com:tr0llex/deploy-kit.git        → https://github.com/tr0llex/deploy-kit
-#   https://github.com/tr0llex/deploy-kit.git    → https://github.com/tr0llex/deploy-kit
-#   ssh://git@github.com:22/tr0llex/deploy-kit   → https://github.com/tr0llex/deploy-kit
+#   git@github.com:samoy-love/deploy-kit.git        → https://github.com/samoy-love/deploy-kit
+#   https://github.com/samoy-love/deploy-kit.git    → https://github.com/samoy-love/deploy-kit
+#   ssh://git@github.com:22/samoy-love/deploy-kit   → https://github.com/samoy-love/deploy-kit
 #
 # ЭТО НЕ МОЖЕТ УРОНИТЬ ВЫКАТКУ И НЕ ДОЛЖНО. Нет remote (свежий локальный
 # репозиторий, зеркало, каталог без git), remote незнакомой формы, старый git

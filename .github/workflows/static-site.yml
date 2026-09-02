@@ -6,7 +6,7 @@ name: static-site
 #
 #   jobs:
 #     deploy:
-#       uses: tr0llex/deploy-kit/.github/workflows/static-site.yml@main
+#       uses: samoy-love/deploy-kit/.github/workflows/static-site.yml@main
 #       with:
 #         config: .deploy-kit/prod.env
 #         gates: npm ci && npm run test:coverage && npm run build
@@ -417,7 +417,7 @@ jobs:
       # его приводит lib/notify.sh — единственный нормализатор на всю цепочку.
       - name: Событие — выкатка началась
         if: ${{ !inputs.dry-run && steps.cfg.outputs.app != '' }}
-        uses: tr0llex/deploy-kit/.github/actions/notify@main
+        uses: samoy-love/deploy-kit/.github/actions/notify@main
         with:
           app: ${{ steps.cfg.outputs.app }}
           kind: started
@@ -487,7 +487,7 @@ jobs:
             # Ссылка на main — тем же способом, что и ci/nginx-check.sh ниже:
             # reusable workflow вызывают как @main, и конфиг обязан приехать из
             # той же точки, что и проверяющий его скрипт.
-            curl -fsSL "https://raw.githubusercontent.com/tr0llex/deploy-kit/${KIT_REF:-main}/$KIT_CONF" -o /tmp/site.conf \
+            curl -fsSL "https://raw.githubusercontent.com/samoy-love/deploy-kit/${KIT_REF:-main}/$KIT_CONF" -o /tmp/site.conf \
               || { echo "::error::не удалось скачать $KIT_CONF из deploy-kit"; exit 1; }
             # Пустой файл curl считает успехом, а nginx — валидным конфигом:
             # выкатка бы прошла зелёной и оставила сайт без единого location.
@@ -523,7 +523,7 @@ jobs:
           # правки следующим же прогоном.
           KIT_REF: ${{ github.job_workflow_sha }}
         run: |
-          curl -fsSL "https://raw.githubusercontent.com/tr0llex/deploy-kit/${KIT_REF:-main}/ci/nginx-check.sh" -o /tmp/nginx-check.sh \
+          curl -fsSL "https://raw.githubusercontent.com/samoy-love/deploy-kit/${KIT_REF:-main}/ci/nginx-check.sh" -o /tmp/nginx-check.sh \
             || { echo "::error::не удалось скачать ci/nginx-check.sh — ранняя проверка конфига невозможна"; exit 1; }
           bash /tmp/nginx-check.sh "${{ steps.nginxsrc.outputs.path }}"
 
@@ -707,7 +707,7 @@ jobs:
           fi
           # Качается оттуда же, откуда ci/nginx-check.sh, — один генератор на
           # все пути выкатки, чтобы лента релизов читалась одинаково.
-          if ! curl -fsSL "https://raw.githubusercontent.com/tr0llex/deploy-kit/${KIT_REF:-main}/bin/changelog" -o /tmp/changelog; then
+          if ! curl -fsSL "https://raw.githubusercontent.com/samoy-love/deploy-kit/${KIT_REF:-main}/bin/changelog" -o /tmp/changelog; then
             echo "::warning::bin/changelog не скачался — релиз уедет без списка изменений"
             exit 0
           fi
@@ -1081,7 +1081,7 @@ jobs:
       # только красный прогон.
       - name: Событие — исход выкатки
         if: ${{ always() && !inputs.dry-run && steps.cfg.outputs.app != '' }}
-        uses: tr0llex/deploy-kit/.github/actions/notify@main
+        uses: samoy-love/deploy-kit/.github/actions/notify@main
         with:
           app: ${{ steps.cfg.outputs.app }}
           kind: ${{ job.status == 'success' && 'success' || 'failure' }}
