@@ -26,18 +26,23 @@
 # bin/install-server.
 name: Выкатка
 
+# ЗАПУСК ТОЛЬКО ВРУЧНУЮ — и это следствие модели прав, а не недосмотр.
+#
+# install-server ставит файлы от root (install, bash -n, nginx -t, systemctl).
+# Дать эти права CI-пользователю — значит дать ему root, а вместе с ним и
+# утечке DEPLOY_SSH_KEY. Об этом прямо написано в шапке server/sudoers.d/
+# deploy-kit: «install-server запускает человек своей учёткой, а не CI».
+#
+# На старом сервере (Oracle) автозапуск работал лишь потому, что CI ходил под
+# ubuntu с NOPASSWD:ALL — то есть ровно из-за той дыры, которую разделение
+# учёток и закрывает. Оставленный автозапуск давал бы красный CI на каждую
+# правку server/**, а сервер при этом молча не обновлялся бы.
+#
+# Порядок теперь такой: влить PR -> выложить руками админской учёткой
+#     DK_CONF=<конфиг> deploy-kit/bin/install-server --apply
+# Кнопка «Run workflow» ниже остаётся: она пригодится на хосте, где CI
+# всё-таки имеет широкие права.
 on:
-  push:
-    branches: [main]
-    paths:
-      # Ровно то, что публикует install-server. Правка bin/* или README сервер
-      # не трогает: bin/changelog CI качает с raw.githubusercontent прямо на
-      # раннер, а bin/deploy и bin/dk работают с машины разработчика.
-      - 'server/**'
-      - 'nginx/snippets/**'
-      - 'nginx/conf.d/**'
-      - 'nginx/sites/000-default.conf'
-      - '.github/workflows/deploy.yml'
   workflow_dispatch:
     inputs:
       dry-run:
