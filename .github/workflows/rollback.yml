@@ -190,7 +190,7 @@ concurrency:
 jobs:
   rollback:
     name: Откат на сервере
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       # Глубина 1: из репозитория читается один файл — описание цели. Ни
