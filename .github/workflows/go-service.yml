@@ -945,7 +945,14 @@ jobs:
           UNIT_NAME="deploy-$(printf '%s' "$APP" | tr -c 'a-zA-Z0-9_.-' '-')-$GITHUB_RUN_ID-${GITHUB_RUN_ATTEMPT:-1}"
           RC=0
           ssh -i ~/.ssh/deploy_key "$USER@$HOST" "
-            if command -v systemd-run >/dev/null 2>&1; then
+            # Проверяем не наличие бинарника, а ПРАВО его запустить: у CI-пользователя
+            # с узким списком sudo (server/sudoers.d/deploy-kit) systemd-run не
+            # разрешён — и не должен быть, он равносилен запуску чего угодно от root.
+            # Раньше условие смотрело только наличие бинарника, ветка бралась всегда, и
+            # выкатка падала на «sudo: a password is required» вместо отката к
+            # прямому вызову. Без transient-юнита теряется устойчивость к разрыву
+            # SSH — это осознанный размен на узкие права CI.
+            if sudo -n systemd-run --version >/dev/null 2>&1; then
               sudo systemd-run --wait --collect --quiet --pipe --unit=$(printf '%q' "$UNIT_NAME") $CMD
             else
               $CMD

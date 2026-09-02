@@ -19,7 +19,7 @@ name: desktop-artifact
 #
 #   jobs:
 #     installer:
-#       uses: tr0llex/deploy-kit/.github/workflows/desktop-artifact.yml@main
+#       uses: samoy-love/deploy-kit/.github/workflows/desktop-artifact.yml@main
 #       with:
 #         config: .deploy-kit/installer.env
 #       secrets: inherit
@@ -456,7 +456,7 @@ jobs:
       # действия и там же объяснено.
       - name: Событие — выкатка началась
         if: ${{ steps.cfg.outputs.upload_dest != '' && steps.cfg.outputs.event_app != '' && !inputs.dry-run }}
-        uses: tr0llex/deploy-kit/.github/actions/notify@main
+        uses: samoy-love/deploy-kit/.github/actions/notify@main
         with:
           app: ${{ steps.cfg.outputs.event_app }}
           kind: started
@@ -687,7 +687,7 @@ jobs:
           # правки следующим же прогоном.
           KIT_REF: ${{ github.job_workflow_sha }}
         run: |
-          curl -fsSL "https://raw.githubusercontent.com/tr0llex/deploy-kit/${KIT_REF:-main}/bin/selfupdate-upload" -o /tmp/selfupdate-upload \
+          curl -fsSL "https://raw.githubusercontent.com/samoy-love/deploy-kit/${KIT_REF:-main}/bin/selfupdate-upload" -o /tmp/selfupdate-upload \
             || { echo "::error::не удалось скачать bin/selfupdate-upload из deploy-kit — сборка самообновления не уедет"; exit 1; }
           [ -s /tmp/selfupdate-upload ] || { echo "::error::bin/selfupdate-upload скачался пустым"; exit 1; }
           for ATTEMPT in 1 2 3 4 5 6; do
@@ -864,7 +864,7 @@ jobs:
           # список НИКОГДА — следующий отсчёт начнётся уже от следующего
           # пуша. Для установщика это терпимо (клиент катится реже сайта), но
           # молчаливой эту потерю оставлять нельзя.
-          if ! curl -fsSL "https://raw.githubusercontent.com/tr0llex/deploy-kit/${KIT_REF:-main}/bin/changelog" -o /tmp/changelog; then
+          if ! curl -fsSL "https://raw.githubusercontent.com/samoy-love/deploy-kit/${KIT_REF:-main}/bin/changelog" -o /tmp/changelog; then
             echo "::warning::bin/changelog не скачался — публикация уедет без списка изменений"
             exit 0
           fi
@@ -896,7 +896,7 @@ jobs:
       # второй нормализатор здесь был бы вторым способом ошибиться.
       - name: Событие — исход публикации
         if: always() && needs.build.outputs.event_app != ''
-        uses: tr0llex/deploy-kit/.github/actions/notify@main
+        uses: samoy-love/deploy-kit/.github/actions/notify@main
         with:
           app: ${{ needs.build.outputs.event_app }}
           # Успех — это опубликованный и сверенный файл (выход published), а

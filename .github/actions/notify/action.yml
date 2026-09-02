@@ -132,7 +132,7 @@ runs:
         #
         # Они его и получают. Цели разведены по ЗАДАЧАМ ОДНОГО workflow
         # (chillhub: site → api → admin → admin-ui → installer, каждая
-        # `uses: tr0llex/deploy-kit/...`), а вызов переиспользуемого workflow
+        # `uses: samoy-love/deploy-kit/...`), а вызов переиспользуемого workflow
         # не заводит своего прогона: его задачи принадлежат прогону
         # вызывающего. Поэтому github.run_id и github.run_attempt одинаковы
         # во всех задачах, а github.repository внутри вызываемого workflow —
