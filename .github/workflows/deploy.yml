@@ -26,23 +26,28 @@
 # bin/install-server.
 name: Выкатка
 
-# ЗАПУСК ТОЛЬКО ВРУЧНУЮ — и это следствие модели прав, а не недосмотр.
+# Выкатка серверной части идёт автоматически, но НЕ под обычной учёткой CI.
 #
-# install-server ставит файлы от root (install, bash -n, nginx -t, systemctl).
-# Дать эти права CI-пользователю — значит дать ему root, а вместе с ним и
-# утечке DEPLOY_SSH_KEY. Об этом прямо написано в шапке server/sudoers.d/
-# deploy-kit: «install-server запускает человек своей учёткой, а не CI».
+# install-server пишет файлы от root (install, bash, tee), и сузить это нельзя:
+# каждая из этих команд сама по себе равна root. Поэтому на сервере заведён
+# ОТДЕЛЬНЫЙ пользователь deploy-admin с широкими правами, а секреты
+# DEPLOY_USER и DEPLOY_SSH_KEY переопределены на уровне ЭТОГО репозитория.
 #
-# На старом сервере (Oracle) автозапуск работал лишь потому, что CI ходил под
-# ubuntu с NOPASSWD:ALL — то есть ровно из-за той дыры, которую разделение
-# учёток и закрывает. Оставленный автозапуск давал бы красный CI на каждую
-# правку server/**, а сервер при этом молча не обновлялся бы.
-#
-# Порядок теперь такой: влить PR -> выложить руками админской учёткой
-#     DK_CONF=<конфиг> deploy-kit/bin/install-server --apply
-# Кнопка «Run workflow» ниже остаётся: она пригодится на хосте, где CI
-# всё-таки имеет широкие права.
+# Смысл разделения: ключ, который лежит в остальных девяти репозиториях,
+# остаётся узким — им можно запустить ровно пять скриптов deploy-kit. Root
+# получает один этот workflow, а не весь парк.
 on:
+  push:
+    branches: [main]
+    paths:
+      # Ровно то, что публикует install-server. Правка bin/* или README сервер
+      # не трогает: bin/changelog CI качает с raw.githubusercontent прямо на
+      # раннер, а bin/deploy и bin/dk работают с машины разработчика.
+      - 'server/**'
+      - 'nginx/snippets/**'
+      - 'nginx/conf.d/**'
+      - 'nginx/sites/000-default.conf'
+      - '.github/workflows/deploy.yml'
   workflow_dispatch:
     inputs:
       dry-run:
@@ -157,6 +162,10 @@ jobs:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_KEY: /home/runner/.ssh/deploy_key
+          # Писателей событий двое: обычная выкатка идёт под узкой учёткой CI,
+          # а install-server — под админской. Без записи для группы второй
+          # писатель терял бы доступ при каждой установке.
+          DK_EVENTS_MODE: '3770'
         run: bash bin/install-server
 
       - name: Прошлая версия на сервере
@@ -190,6 +199,10 @@ jobs:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_KEY: /home/runner/.ssh/deploy_key
+          # Писателей событий двое: обычная выкатка идёт под узкой учёткой CI,
+          # а install-server — под админской. Без записи для группы второй
+          # писатель терял бы доступ при каждой установке.
+          DK_EVENTS_MODE: '3770'
         run: bash bin/install-server --apply
 
       - name: Отметить версию на сервере
