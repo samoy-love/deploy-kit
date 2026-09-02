@@ -791,7 +791,7 @@ jobs:
   notify:
     needs: build
     if: ${{ always() && needs.build.outputs.upload_dest != '' && !inputs.dry-run }}
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux]
     timeout-minutes: 10
     steps:
       # Ключ хоста нужен и здесь: доставка события идёт по SSH со СВОИМ
