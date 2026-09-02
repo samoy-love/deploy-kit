@@ -1,0 +1,66 @@
+# Гигиена инфраструктуры: не выпускать наружу подробности о том, где стоит прод.
+#
+# Вызывается из CI каждого проекта одной строкой:
+#
+#   infra:
+#     uses: samoy-love/deploy-kit/.github/workflows/infra-hygiene.yml@main
+#
+# Проверяются добавленные строки PR, сообщения коммитов PR, заголовок и
+# описание PR. Разбор шаблонов и того, что намеренно НЕ ловится, — в
+# ci/infra-hygiene.sh.
+#
+# Скрипт качается с raw, а не берётся из репозитория вызывающего: у него
+# скрипта нет. Тот же приём уже используют go-service.yml и static-site.yml
+# для bin/changelog — держим единообразно.
+name: Гигиена инфраструктуры
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Ветка deploy-kit, откуда брать скрипт (для отладки самого гейта)'
+        required: false
+        type: string
+        default: 'main'
+
+permissions:
+  contents: read
+
+jobs:
+  infra-hygiene:
+    name: Подробности инфраструктуры не утекают
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # fetch-depth: 0 обязателен: без полной истории git diff base...head
+      # не с чем сравнивать, и гейт молча проверит пустоту.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Забрать проверку
+        env:
+          DK_REF: ${{ inputs.ref }}
+        run: |
+          set -Eeuo pipefail
+          curl -fsSL --retry 3 --max-time 30 \
+            "https://raw.githubusercontent.com/samoy-love/deploy-kit/${DK_REF}/ci/infra-hygiene.sh" \
+            -o /tmp/infra-hygiene.sh
+          chmod +x /tmp/infra-hygiene.sh
+
+      - name: Проверить
+        env:
+          # Заголовок и описание PR в git не лежат — передаём окружением.
+          # На push-событии их нет, и это не ошибка: тогда проверяются
+          # только строки и коммиты.
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -Eeuo pipefail
+          if [ -n "${BASE_SHA:-}" ]; then
+            /tmp/infra-hygiene.sh "$BASE_SHA" HEAD
+          else
+            # push: сравнивать не с чем, остаются заголовок и описание (пусты).
+            /tmp/infra-hygiene.sh
+          fi
