@@ -58,7 +58,9 @@ HEAD_REF="${2:-HEAD}"
 if [ -n "$BASE" ]; then
     # Только добавленные строки: то, что уже лежало в репозитории, этот PR
     # чинить не обязан — иначе гейт заблокирует всё подряд.
-    git diff --unified=0 "$BASE...$HEAD_REF" -- . \
+    # Сама проверка из сканирования исключена: её шаблоны — это ровно те
+    # строки, которые она ищет, и без исключения она валит собственный PR.
+    git diff --unified=0 "$BASE...$HEAD_REF" -- . ':(exclude)ci/infra-hygiene.sh' ':(exclude).github/workflows/infra-hygiene.yml' \
       | grep -E '^\+' | grep -vE '^\+\+\+' | sed 's/^\+//' > "$TMP/added" || true
     scan_file "изменённые строки" "$TMP/added"
 
