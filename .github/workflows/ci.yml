@@ -296,3 +296,26 @@ jobs:
         env:
           SELF_JOB_NAME: Защита ветки соответствует задачам CI
         run: bash ci/branch-protection-check.sh
+
+  infra:
+    name: Гигиена инфраструктуры
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Без полной истории git diff base...head не с чем сравнивать,
+          # и гейт молча проверит пустоту.
+          fetch-depth: 0
+      - name: Подробности инфраструктуры не утекают
+        env:
+          # Заголовка и описания PR в git нет — передаём окружением.
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ -n "${BASE_SHA:-}" ]; then
+            ci/infra-hygiene.sh "$BASE_SHA" HEAD
+          else
+            ci/infra-hygiene.sh
+          fi
