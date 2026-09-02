@@ -118,7 +118,7 @@ on:
         # BUILD_CMD поднимает сам через docker. Всё остальное — описание цели,
         # сумма, публикация, событие — одинаково на обоих раннерах: шаги ниже
         # написаны на bash, а pwsh на ubuntu-latest тоже есть.
-        description: 'Раннер сборки: windows-latest (умолчание) или ubuntu-latest'
+        description: 'Раннер сборки: одна метка либо JSON-список меток'
         required: false
         type: string
         default: 'windows-latest'
@@ -152,7 +152,11 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ${{ inputs.runner }}
+    # Вход принимает либо одну метку ("ubuntu-latest", "win-builder"), либо
+    # список меток в виде JSON ('["self-hosted", "Linux"]'). Список нужен с тех
+    # пор, как своих машин стало две: метка self-hosted есть у обеих, и сборка
+    # .nro, написанная на bash и требующая docker, уезжала на Windows.
+    runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || inputs.runner }}
     timeout-minutes: 45
     # Всё, что нужно job'у уведомления. Он идёт на ubuntu (см. его шапку) и
     # описания цели уже не видит: файл лежит в репозитории проекта, а читает
