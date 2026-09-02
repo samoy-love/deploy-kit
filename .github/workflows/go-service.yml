@@ -82,7 +82,7 @@ concurrency:
 
 jobs:
   deploy:
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux]
     timeout-minutes: 30
     env:
       # Список изменений собирается ОДИН раз и лежит здесь до конца job'а: его
