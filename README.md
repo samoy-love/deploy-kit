@@ -2,7 +2,7 @@
 
 Русский · [English](README.en.md)
 
-[![CI](https://github.com/tr0llex/deploy-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/tr0llex/deploy-kit/actions/workflows/ci.yml)
+[![CI](https://github.com/samoy-love/deploy-kit/actions/workflows/ci.yml/badge.svg)](https://github.com/samoy-love/deploy-kit/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![nginx 1.24](https://img.shields.io/badge/nginx-1.24-009639)
 
@@ -199,7 +199,7 @@ Windows публикуется тем же событием, видом `publish
 bash bin/changelog --repo .                       # что тут недавно делали
 bash bin/changelog --repo . --since v1.4.0 --max 6
 bash bin/changelog --repo . --max 0 --budget 0    # весь релиз, как в version.json
-bash bin/changelog --repo . --link-base https://github.com/tr0llex/deploy-kit
+bash bin/changelog --repo . --link-base https://github.com/samoy-love/deploy-kit
 ```
 
 Через `bash`, а не запуском файла: в этом репозитории `core.filemode=false`, и
@@ -282,7 +282,7 @@ bash bin/changelog --repo . --link-base https://github.com/tr0llex/deploy-kit
 ```yaml
 jobs:
   deploy:
-    uses: tr0llex/deploy-kit/.github/workflows/static-site.yml@main
+    uses: samoy-love/deploy-kit/.github/workflows/static-site.yml@main
     with:
       config: .deploy-kit/prod.env
       gates: npm ci && npm run test:coverage && npm run build
@@ -388,15 +388,15 @@ ZIP полезной нагрузки уезжает в админку лаун�
 
 | Цель | Архетип | Репозиторий |
 |---|---|---|
-| samoy.love | static-site | [samoy.love](https://github.com/tr0llex/samoy.love) |
-| metro.samoy.love | static-site | [metro-map](https://github.com/tr0llex/metro-map) |
-| launcher.samoy.love, морда админки | static-site | [chillhub](https://github.com/tr0llex/chillhub) |
-| Серверы лаунчера и админки | go-service | [chillhub](https://github.com/tr0llex/chillhub) |
-| Установщик ChillHub | desktop-artifact | [chillhub](https://github.com/tr0llex/chillhub) |
-| Сервер и клиент Snakes | go-service | [snakes](https://github.com/tr0llex/snakes) |
-| status.samoy.love, агент и телеграм-бот статуса | static-site + go-service | [status.samoy.love](https://github.com/tr0llex/status.samoy.love) |
-| die.samoy.love                     | static-site | [double-or-die](https://github.com/tr0llex/double-or-die) |
-| Стек мониторинга (Prometheus, Grafana) | compose-стек через systemd-юнит | [metrics.samoy.love](https://github.com/tr0llex/metrics.samoy.love) |
+| samoy.love | static-site | [samoy.love](https://github.com/samoy-love/samoy.love) |
+| metro.samoy.love | static-site | [metro-map](https://github.com/samoy-love/metro-map) |
+| launcher.samoy.love, морда админки | static-site | [chillhub](https://github.com/samoy-love/chillhub) |
+| Серверы лаунчера и админки | go-service | [chillhub](https://github.com/samoy-love/chillhub) |
+| Установщик ChillHub | desktop-artifact | [chillhub](https://github.com/samoy-love/chillhub) |
+| Сервер и клиент Snakes | go-service | [snakes](https://github.com/samoy-love/snakes) |
+| status.samoy.love, агент и телеграм-бот статуса | static-site + go-service | [status.samoy.love](https://github.com/samoy-love/status.samoy.love) |
+| die.samoy.love                     | static-site | [double-or-die](https://github.com/samoy-love/double-or-die) |
+| Стек мониторинга (Prometheus, Grafana) | compose-стек через systemd-юнит | [metrics.samoy.love](https://github.com/samoy-love/metrics.samoy.love) |
 
 Клиент Snakes едет **одним артефактом** с сервером: у них общий бинарный
 протокол, и разъехавшиеся версии ломают разбор пакетов.
@@ -429,13 +429,13 @@ gh workflow run deploy.yml --ref main -f dry-run=true # без последст�
 
 | Проект | Что это |
 |---|---|
-| [samoy.love](https://github.com/tr0llex/samoy.love) | Личная страница и витрина проектов: Astro, 3D-фон на WebGL, ноль трекеров |
-| [chillhub](https://github.com/tr0llex/chillhub) | ChillHub — лаунчер игр для Windows: обновления по диффу, хеш-контроль, админка на Go |
-| [snakes](https://github.com/tr0llex/snakes) | Мультиплеерный захват территории в браузере: Go, WebSocket, бинарный протокол |
-| [metro-map](https://github.com/tr0llex/metro-map) | Офлайн-PWA со схемой московского метро: маршруты на клиенте, Canvas 2D |
-| [status.samoy.love](https://github.com/tr0llex/status.samoy.love) | Статус-страница: аптайм, версии, инциденты; агент на Go и внешний сторож |
-| [metrics.samoy.love](https://github.com/tr0llex/metrics.samoy.love) | Мониторинг и продуктовая аналитика: Prometheus, Grafana, посещаемость из журналов nginx |
-| [deploy-kit](https://github.com/tr0llex/deploy-kit) | Этот репозиторий: общий релизный пайплайн |
+| [samoy.love](https://github.com/samoy-love/samoy.love) | Личная страница и витрина проектов: Astro, 3D-фон на WebGL, ноль трекеров |
+| [chillhub](https://github.com/samoy-love/chillhub) | ChillHub — лаунчер игр для Windows: обновления по диффу, хеш-контроль, админка на Go |
+| [snakes](https://github.com/samoy-love/snakes) | Мультиплеерный захват территории в браузере: Go, WebSocket, бинарный протокол |
+| [metro-map](https://github.com/samoy-love/metro-map) | Офлайн-PWA со схемой московского метро: маршруты на клиенте, Canvas 2D |
+| [status.samoy.love](https://github.com/samoy-love/status.samoy.love) | Статус-страница: аптайм, версии, инциденты; агент на Go и внешний сторож |
+| [metrics.samoy.love](https://github.com/samoy-love/metrics.samoy.love) | Мониторинг и продуктовая аналитика: Prometheus, Grafana, посещаемость из журналов nginx |
+| [deploy-kit](https://github.com/samoy-love/deploy-kit) | Этот репозиторий: общий релизный пайплайн |
 
 ## Контакты
 

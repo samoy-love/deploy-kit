@@ -319,7 +319,7 @@ CI:      sha256("<repo>|<run_id>|<attempt>|<app>|<kind>")
 Разделитель — `|`, перевода строки в конце нет, кодировка UTF-8, вывод —
 строчный hex.
 
-* `<repo>` — `github.repository`, то есть `tr0llex/snakes`;
+* `<repo>` — `github.repository`, то есть `samoy-love/snakes`;
 * `<run_id>`, `<attempt>` — `github.run_id` и `github.run_attempt`;
 * `<unix-ms>` — тот же миллисекундный момент, что и в имени файла (после
   разрешения столкновения, §2);
@@ -820,14 +820,14 @@ Alertmanager, если он станет источником событий).
 обязан их пересчитывать, а не сверять с константой в своём коде:
 
 ```
-id   tr0llex/snakes|16542330981|1|snakes|success
+id   samoy-love/snakes|16542330981|1|snakes|success
        → d209f71003ade058bf845a91031f2cf424fe40567d446ecb689bfb15df32fa91
-group  tr0llex/snakes|16542330981|1
+group  samoy-love/snakes|16542330981|1
        → 760e4d55c197922abe742e60a367ad828fb1259b1a3da225a5bbb257d8242ad6
 
-id   tr0llex/chillhub|16542331744|2|chillhub-site|failure
+id   samoy-love/chillhub|16542331744|2|chillhub-site|failure
        → 6de00661e76009ac12a18c7f7a395452e790286cb6756bc7c1be1607c250867d
-group  tr0llex/chillhub|16542331744|2
+group  samoy-love/chillhub|16542331744|2
        → ae40809c132b755feaa6a97e123d092ec6a5c3888c8900ae9fd33e4e934dbb48
 
 id   1785925215123|samoy-love|31415|metro|rolled_back
@@ -845,7 +845,7 @@ group  1785925180000|samoy-love|31415
 Проверить руками:
 
 ```bash
-printf '%s' 'tr0llex/snakes|16542330981|1|snakes|success' | sha256sum
+printf '%s' 'samoy-love/snakes|16542330981|1|snakes|success' | sha256sum
 ```
 
 Имена файлов, под которыми эти образцы легли бы в журнал:

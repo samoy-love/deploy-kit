@@ -117,7 +117,7 @@ run_local() { run bash "$NOTIFY" --mode local --events-dir "$DIR" "$@"; }
 # Вызов из пайплайна: source=ci берётся из окружения GitHub, как в настоящем job'е.
 run_ci() {
     run env GITHUB_ACTIONS=true \
-        GITHUB_REPOSITORY="${REPO:-tr0llex/snakes}" \
+        GITHUB_REPOSITORY="${REPO:-samoy-love/snakes}" \
         GITHUB_RUN_ID="${RUN_ID:-16542330981}" \
         GITHUB_RUN_ATTEMPT="${RUN_ATTEMPT:-1}" \
         bash "$NOTIFY" --mode local --events-dir "$DIR" "$@"
@@ -179,12 +179,12 @@ printf '%s\n' 'Показывать пересадки в ночном расп�
 case_ "Событие из пайплайна совпадает с образцом docs/events/example-success.json"
 
 new_dir success
-REPO=tr0llex/snakes RUN_ID=16542330981 RUN_ATTEMPT=1 run_ci \
+REPO=samoy-love/snakes RUN_ID=16542330981 RUN_ATTEMPT=1 run_ci \
     --kind success --app snakes \
     --version release-20260805-130115-1a2b3c4 \
     --previous release-20260804-221407-9f8e7d6 \
-    --commit-url 'https://github.com/tr0llex/snakes/commit/1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d' \
-    --run-url 'https://github.com/tr0llex/snakes/actions/runs/16542330981/attempts/1' \
+    --commit-url 'https://github.com/samoy-love/snakes/commit/1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d' \
+    --run-url 'https://github.com/samoy-love/snakes/actions/runs/16542330981/attempts/1' \
     --changelog-file "$CL_SUCCESS"
 
 same "код возврата" "$RC" "0"
@@ -196,9 +196,9 @@ if [[ -n "$EV" ]]; then
     # sha256 пересчитывается ЗДЕСЬ по прообразу из §5/§6 — не сверяется с
     # константой и не берётся из образца готовым.
     same "id = sha256(repo|run_id|attempt|app|kind)" \
-        "$(field "$EV" id)" "$(sha_of 'tr0llex/snakes|16542330981|1|snakes|success')"
+        "$(field "$EV" id)" "$(sha_of 'samoy-love/snakes|16542330981|1|snakes|success')"
     same "group = sha256(repo|run_id|attempt)" \
-        "$(field "$EV" group)" "$(sha_of 'tr0llex/snakes|16542330981|1')"
+        "$(field "$EV" group)" "$(sha_of 'samoy-love/snakes|16542330981|1')"
     same "v" "$(field "$EV" v)" "1"
     same "source" "$(field "$EV" source)" "ci"
     same "groupSeq первого события группы" "$(field "$EV" groupSeq)" "1"
@@ -211,10 +211,10 @@ fi
 case_ "Провал на гейтах: версии ещё нет, стадия обязательна"
 
 new_dir failure
-REPO=tr0llex/chillhub RUN_ID=16542331744 RUN_ATTEMPT=2 run_ci \
+REPO=samoy-love/chillhub RUN_ID=16542331744 RUN_ATTEMPT=2 run_ci \
     --kind failure --app chillhub-site --stage gates \
-    --commit-url 'https://github.com/tr0llex/chillhub/commit/7f8e9d0c1b2a394857661a2b3c4d5e6f708192a3' \
-    --run-url 'https://github.com/tr0llex/chillhub/actions/runs/16542331744/attempts/2'
+    --commit-url 'https://github.com/samoy-love/chillhub/commit/7f8e9d0c1b2a394857661a2b3c4d5e6f708192a3' \
+    --run-url 'https://github.com/samoy-love/chillhub/actions/runs/16542331744/attempts/2'
 
 same "код возврата" "$RC" "0"
 EV="$(only_event)"
@@ -222,7 +222,7 @@ if [[ -n "$EV" ]]; then
     check_json "$EV" "failure"
     same "набор полей как в образце" "$(keys_of "$EV")" "$(keys_of "$GOLDEN/example-failure.json")"
     same "id = sha256(repo|run_id|attempt|app|kind)" \
-        "$(field "$EV" id)" "$(sha_of 'tr0llex/chillhub|16542331744|2|chillhub-site|failure')"
+        "$(field "$EV" id)" "$(sha_of 'samoy-love/chillhub|16542331744|2|chillhub-site|failure')"
 else
     bad "событие не записано (rc=$RC): $(head -2 "$OUT")"
 fi
@@ -249,7 +249,7 @@ run env DK_TEST_FIXED_MS="$MS_EVENT" DK_RUN_STARTED_MS="$MS_RUN" DK_RUN_PID=3141
     --version manual-20260805-131944-c4d5e6f \
     --previous manual-20260803-201155-b1a2c3d \
     --stage health --reason health_failed \
-    --commit-url 'https://github.com/tr0llex/metro-map/commit/c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7' \
+    --commit-url 'https://github.com/samoy-love/metro-map/commit/c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7' \
     --changelog-file "$CL_ROLLED"
 
 same "код возврата" "$RC" "0"
@@ -459,7 +459,7 @@ same "stage вне перечисления — отказ" "$(( RC != 0 ))" "1"
 # сообщении остаётся текстом. Ровно так же, как при отсутствии commitURL.
 new_dir url
 run_local --source local --kind success --app snakes --version manual-20260805-101502-1a2b3c4 \
-    --commit-url 'javascript:alert(1)' --run-url 'https://github.com/tr0llex/snakes/actions/runs/1'
+    --commit-url 'javascript:alert(1)' --run-url 'https://github.com/samoy-love/snakes/actions/runs/1'
 same "код возврата" "$RC" "0"
 EV="$(only_event)"
 if [[ -n "$EV" ]]; then
@@ -495,7 +495,7 @@ new_dir changelog
 cat >"$TMP/cl-html" <<'HTML'
 <b>Изменения</b>
 • Не выдавать недоставленное уведомление за успех
-• Починить обрыв скачивания больших файлов <a href="https://github.com/tr0llex/snakes/pull/21">#21</a>
+• Починить обрыв скачивания больших файлов <a href="https://github.com/samoy-love/snakes/pull/21">#21</a>
 • Убрать &lt;script&gt; из шаблона &amp; заодно лишний вызов
 …и ещё 12 коммитов
 HTML

@@ -759,7 +759,7 @@ expect_has "• Не пускать релиз без версии"
 case_ "6j. --link-base: срезанный номер возвращается ссылкой в конец пункта"
 # Срезать номер целиком — потеря: из чата к обсуждению изменения не перейти.
 # С базой номер возвращается, но уже как ссылка, а не как текстовый шум.
-BASE="https://github.com/tr0llex/deploy-kit"
+BASE="https://github.com/samoy-love/deploy-kit"
 R="$(mkrepo link)"
 commit "$R" "Завести dependabot одинаково во всех репозиториях (#21)"
 run "$R" --no-header --link-base "$BASE"
