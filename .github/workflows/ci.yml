@@ -40,7 +40,7 @@ jobs:
   # клоне отсутствует — здесь страховка.
   commits:
     name: Коммиты без упоминаний ИИ
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, home]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -67,7 +67,7 @@ jobs:
 
   shell:
     name: Скрипты
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, home]
     # Разбор аргументов в скриптах — цикл `while [[ $# -gt 0 ]]`, и ветка,
     # забывшая сдвинуть аргументы, крутится вечно. Без явного лимита такой
     # прогон держал бы раннер до общего потолка в шесть часов и выглядел бы
@@ -202,7 +202,7 @@ jobs:
 
   nginx:
     name: Конфигурация nginx
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, home]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -226,7 +226,7 @@ jobs:
 
   workflows:
     name: Переиспользуемые workflow
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, home]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -273,7 +273,7 @@ jobs:
   # передаётся только этому шагу, а не всей задаче.
   protection-sync:
     name: Защита ветки соответствует задачам CI
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, home]
     timeout-minutes: 5
     env:
       GH_TOKEN: ${{ secrets.PROTECTION_READ_TOKEN }}
@@ -299,7 +299,7 @@ jobs:
 
   infra:
     name: Гигиена инфраструктуры
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, home]
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
