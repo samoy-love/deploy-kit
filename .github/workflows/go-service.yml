@@ -46,6 +46,27 @@ on:
         required: false
         type: boolean
         default: false
+    # СЕКРЕТЫ ОБЪЯВЛЕНЫ, ЧТОБЫ ИХ МОЖНО БЫЛО ПЕРЕДАТЬ ЯВНО. Без объявления
+    # работает только `secrets: inherit`, и все цели проекта катятся на один
+    # DEPLOY_HOST. Цель на другой машине (cs2: рендер клипов в своём контейнере)
+    # передаёт свои значения поимённо:
+    #
+    #     secrets:
+    #       DEPLOY_HOST: ${{ secrets.DEPLOY_HOST_RENDER }}
+    #       SSH_HOST_KEY: ${{ secrets.SSH_HOST_KEY_RENDER }}
+    #       DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+    #       DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+    #
+    # Все необязательны: `secrets: inherit` работает как прежде.
+    secrets:
+      DEPLOY_HOST:
+        required: false
+      DEPLOY_USER:
+        required: false
+      DEPLOY_SSH_KEY:
+        required: false
+      SSH_HOST_KEY:
+        required: false
 
 # Минимальные права для GITHUB_TOKEN. Саму выкатку пайплайн делает по SSH
 # секретами, а не токеном; токену остаются checkout и ОДНА вещь сверх того —
