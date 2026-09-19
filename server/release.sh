@@ -200,6 +200,8 @@ rm -rf "$NEW_DIR"
 mkdir -p "$NEW_DIR"
 tar -xzf "$ARCHIVE" -C "$NEW_DIR"
 [[ -n "$OWNER" ]] && chown -R "$OWNER" "$NEW_DIR"
+# Код релиза — только на чтение для группы службы (см. seal_release в lib.sh).
+seal_release "$NEW_DIR"
 
 # Бит запуска у бинаря сервиса.
 #
