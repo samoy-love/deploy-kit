@@ -117,6 +117,10 @@ log "откат $APP: $(basename "$CUR") -> $(basename "$TARGET")"
 LIVE_RELEASE=""
 [[ -n "$CUR" ]] && LIVE_RELEASE="$(basename "$CUR")"
 monotonic_gate "$(basename "$TARGET")" "$LIVE_RELEASE" "$ALLOW_OLDER"
+# Релизы, разложенные до seal_release, лежат с записью для группы службы.
+# Откат на такой — ровно тот случай, когда он снова станет живым, поэтому права
+# выравниваются до переключения. На уже запечатанном релизе это пустая операция.
+seal_release "$TARGET"
 [[ -n "$CUR" ]] && switch_symlink "$ROOT/previous" "$CUR"
 switch_symlink "$CURRENT" "$TARGET"
 
