@@ -154,6 +154,26 @@ else
         done
     fi
 
+    # КЛЮЧИ — OPENSSL РАННЕРА, А НЕ APK ВНУТРИ КОНТЕЙНЕРА (22.09.2026). В образе
+    # nginx нет утилиты openssl, и `apk add` тянул её из сети на каждой
+    # проверке: у своих раннеров сеть узкая, и шаг занимал до 5 минут
+    # (samoy.love 315 с, double-or-die 300 с). Сертификат-заглушка и dhparam
+    # генерируются здесь за секунду и уезжают в контейнер тем же base64, что и
+    # конфиг. Нет openssl на машине — прежний путь через apk.
+    b64() { base64 -w0 "$1" 2>/dev/null || base64 "$1" | tr -d '
+'; }
+    if command -v openssl >/dev/null 2>&1; then
+        pki="$(mktemp -d)"
+        openssl dhparam -out "$pki/dh.pem" 1024 >/dev/null 2>&1
+        openssl req -x509 -newkey rsa:2048 -nodes -keyout "$pki/key.pem" -out "$pki/crt.pem" -days 1 -subj '/CN=test' >/dev/null 2>&1
+        dh_cmd="echo '$(b64 "$pki/dh.pem")' | base64 -d > /etc/letsencrypt/ssl-dhparams.pem"
+        crt_cmd="echo '$(b64 "$pki/crt.pem")' | base64 -d > \"\$crt\"; echo '$(b64 "$pki/key.pem")' | base64 -d > \"\$key\""
+        rm -rf "$pki"
+    else
+        dh_cmd="apk add --no-cache openssl >/dev/null 2>&1; openssl dhparam -out /etc/letsencrypt/ssl-dhparams.pem 1024 >/dev/null 2>&1"
+        crt_cmd="openssl req -x509 -newkey rsa:2048 -nodes -keyout \"\$key\" -out \"\$crt\" -days 1 -subj '/CN=test' >/dev/null 2>&1"
+    fi
+
     if docker run --rm -i --entrypoint sh "nginx:${NGINX_VERSION}-alpine" -s <<SCRIPT
 set -e
 mkdir -p /etc/nginx/sites-enabled /etc/nginx/snippets /etc/nginx/conf.d
@@ -161,14 +181,11 @@ $confd_cmds
 $snippet_cmds
 # Файлы, которые certbot кладёт на боевой хост. На раннере их нет, и без
 # заглушек nginx падает по причине, не связанной с проверяемым конфигом.
-# openssl нужен и здесь (dhparam), и ниже (сертификаты) — ставим один раз
-# до первого использования.
-apk add --no-cache openssl >/dev/null 2>&1
 mkdir -p /etc/letsencrypt
 : > /etc/letsencrypt/options-ssl-nginx.conf
 # nginx разбирает содержимое ssl_dhparam, пустышка его не устроит.
 # 1024 бит достаточно: файл нужен только для проверки синтаксиса.
-openssl dhparam -out /etc/letsencrypt/ssl-dhparams.pem 1024 >/dev/null 2>&1
+$dh_cmd
 echo '$conf_b64' | base64 -d > /etc/nginx/sites-enabled/site.conf
 
 # Пустой конфиг обязан быть замечен: иначе проверка снова станет
@@ -193,7 +210,7 @@ WRAP
 for crt in \$(grep -hoE 'ssl_certificate[[:space:]]+[^;]+' /etc/nginx/sites-enabled/site.conf | awk '{print \$2}' | sort -u); do
     key=\$(echo "\$crt" | sed 's/fullchain/privkey/')
     mkdir -p "\$(dirname "\$crt")" "\$(dirname "\$key")"
-    openssl req -x509 -newkey rsa:2048 -nodes -keyout "\$key" -out "\$crt" -days 1 -subj '/CN=test' >/dev/null 2>&1
+    $crt_cmd
     # chain.pem нужен для OCSP stapling (ssl_trusted_certificate).
     cp "\$crt" "\$(dirname "\$crt")/chain.pem" 2>/dev/null || true
 done
