@@ -105,7 +105,7 @@ ver=$(nginx -v 2>&1 | sed -n 's/.*nginx\/\([0-9.]*\).*/\1/p')
 if grep -qE '^\s*http2\s+on\s*;' "$CONF"; then
     # Сравнение версий без bc: 1.25.1 — первая, где директива появилась.
     if [[ "$(printf '%s\n1.25.1\n' "$ver" | sort -V | head -1)" == "$ver" && "$ver" != "1.25.1" ]]; then
-        die "конфиг использует 'http2 on;', а на хосте nginx $ver — нужна форма 'listen 443 ssl http2;'"
+        die "конфиг использует 'http2 on;', а на хосте nginx $ver — http2 объявляет только 000-default.conf ('listen 443 ssl http2 default_server;')"
     fi
 fi
 ok "конфиг совместим с nginx $ver"
