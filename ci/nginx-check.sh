@@ -30,10 +30,20 @@ echo "== статические проверки =="
 # 1. Директива http2 в новой форме на старом nginx.
 if grep -qE '^\s*http2\s+on\s*;' "$CONF"; then
     if [[ "$(printf '%s\n1.25.1\n' "$NGINX_VERSION" | sort -V | head -1)" == "$NGINX_VERSION" && "$NGINX_VERSION" != "1.25.1" ]]; then
-        bad "'http2 on;' не поддерживается nginx $NGINX_VERSION — используйте 'listen 443 ssl http2;'"
+        bad "'http2 on;' не поддерживается nginx $NGINX_VERSION — http2 объявляет только 000-default.conf"
     fi
 else
     good "директива http2 в совместимой форме"
+fi
+
+# 1б. http2 в listen у сайта. Набор протоколов — свойство сокета *:443, общего
+#     для всех сайтов хоста, и объявляется один раз в 000-default.conf. Сайт,
+#     повторивший его, получает от nginx -t «protocol options redefined»:
+#     30.09.2026 таких предупреждений было 14, и настоящее среди них терялось.
+if grep -qE '^\s*listen[^;#]*http2' "$CONF" && ! grep -q '000-default' <<<"$CONF"; then
+    bad "сайт объявляет http2 в listen — он задан один раз в 000-default.conf, пишите 'listen 443 ssl;'"
+else
+    good "http2 не переобъявлен"
 fi
 
 # 2. default_server. Он должен быть ровно один на весь хост и жить в
@@ -211,8 +221,6 @@ for crt in \$(grep -hoE 'ssl_certificate[[:space:]]+[^;]+' /etc/nginx/sites-enab
     key=\$(echo "\$crt" | sed 's/fullchain/privkey/')
     mkdir -p "\$(dirname "\$crt")" "\$(dirname "\$key")"
     $crt_cmd
-    # chain.pem нужен для OCSP stapling (ssl_trusted_certificate).
-    cp "\$crt" "\$(dirname "\$crt")/chain.pem" 2>/dev/null || true
 done
 
 nginx -t
