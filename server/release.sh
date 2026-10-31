@@ -247,6 +247,7 @@ fi
 monotonic_gate "$VERSION" "$LIVE_RELEASE" 0
 
 [[ -n "$PREV_TARGET" ]] && switch_symlink "$PREVIOUS" "$PREV_TARGET"
+dk_maintenance 600
 switch_symlink "$CURRENT" "$NEW_DIR"
 ok "current -> $VERSION"
 
