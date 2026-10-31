@@ -94,6 +94,12 @@ notify_event() { # notify_event --kind <вид> [флаги notify.sh…]
         [[ "${a[i]}" == "--kind" ]] && { kind="${a[i+1]}"; break; }
     done
 
+    # Завершение окна не зависит от политики доставки уведомлений.
+    case "$kind" in
+        success|rollback) dk_maintenance 120 ;;
+        failure|rolled_back) dk_maintenance 0 ;;
+    esac
+
     if [[ -n "$kind" ]] && ! notify_wanted "$kind"; then
         log "цель просила NOTIFY=$DK_EVENT_NOTIFY — событие «$kind» не отправляется"
         return 0
@@ -116,6 +122,27 @@ notify_event() { # notify_event --kind <вид> [флаги notify.sh…]
     else
         bash "$DK_NOTIFY_SH" --mode local "${grp[@]}" "$@" </dev/null \
             || warn "событие не отправлено (код $?): $*"
+    fi
+    return 0
+}
+
+# Короткое окно только для цели, которую сейчас переключаем. Журнал событий
+# общий для контейнеров; сборщик мониторинга читает эти скрытые отметки.
+# Нет бесконечного silence: даже при SIGKILL отметка истекает через 10 минут.
+# Сбой записи не должен мешать выкатке или спасительному откату.
+dk_maintenance() {
+    local ttl="$1" dir="${DK_EVENTS_DIR:-/var/lib/deploy-kit/events}" now tmp
+    [[ "${APP:-}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || return 0
+    [[ "$ttl" =~ ^[0-9]+$ ]] && (( ttl <= 600 )) || return 0
+    if ! (
+        umask 022
+        mkdir -p -- "$dir" &&
+        now=$(date +%s) &&
+        tmp=$(mktemp "$dir/.maintenance-${APP}.XXXXXX") &&
+        printf '{"app":"%s","until":%s,"written":%s}\n' "$APP" "$((now + ttl))" "$now" > "$tmp" &&
+        chmod 0644 "$tmp" && mv -f -- "$tmp" "$dir/.maintenance-$APP.json"
+    ); then
+        warn "не удалось записать окно мониторинга для $APP"
     fi
     return 0
 }

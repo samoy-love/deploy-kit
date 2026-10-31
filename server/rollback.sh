@@ -122,6 +122,7 @@ monotonic_gate "$(basename "$TARGET")" "$LIVE_RELEASE" "$ALLOW_OLDER"
 # выравниваются до переключения. На уже запечатанном релизе это пустая операция.
 seal_release "$TARGET"
 [[ -n "$CUR" ]] && switch_symlink "$ROOT/previous" "$CUR"
+dk_maintenance 600
 switch_symlink "$CURRENT" "$TARGET"
 
 # Юниты откатываем вместе с релизом — ровно так же, как это делает

@@ -181,6 +181,10 @@ jobs:
         timeout-minutes: 5
         run: bash ci/seal-test.sh
 
+      - name: Окно мониторинга при выкатке
+        timeout-minutes: 5
+        run: bash ci/maintenance-test.sh
+
       # ДВА НАБОРА НИЖЕ ЛЕЖАЛИ РЯДОМ И НЕ ЗАПУСКАЛИСЬ НИГДЕ.
       #
       # В CI они попадали только как вход для shellcheck, то есть проверялись
