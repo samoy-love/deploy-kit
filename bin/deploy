@@ -508,7 +508,11 @@ if ! (( DRY )); then
     # всегда её уже содержит, и доуглубление не срабатывает вовсе.
     CL_LIVE=""
     if [[ -n "${VERSION_URL:-}" ]]; then
-        VJ="$(curl -fsS --max-time 10 "$VERSION_URL" 2>/dev/null | tr ',' '\n')"
+        # При первой публикации отметки ещё нет. Это только источник списка
+        # изменений; проверка новой версии после выкатки остаётся обязательной.
+        if ! VJ="$(curl -fsS --max-time 10 "$VERSION_URL" 2>/dev/null | tr ',' '\n')"; then
+            VJ=""
+        fi
         CL_LIVE="$(printf '%s\n' "$VJ" | sed -n 's/.*"commit"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
         [[ -n "$CL_LIVE" ]] || CL_LIVE="$(printf '%s\n' "$VJ" \
             | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"

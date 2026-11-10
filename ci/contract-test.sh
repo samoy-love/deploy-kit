@@ -911,6 +911,43 @@ else
     bad "у действия нет входа changelog-html — передавать некуда"
 fi
 
+# Первая публикация не имеет version.json. Выполняем настоящий фрагмент
+# bin/deploy с его set -e/pipefail: отказ справочного GET не должен обрывать
+# сборку до проверки сервера и обязательной проверки уже новой версии.
+case_ "Первая публикация и недоступная старая отметка версии"
+awk '/^    CL_LIVE=""$/ {copy=1} copy && /^    if \[\[ -n "\$CL_LIVE" \]\]; then$/ {exit} copy {print}' \
+    "$DEPLOY" > "$TMP/live-version.sh"
+if [[ ! -s "$TMP/live-version.sh" ]]; then
+    bad "не найден настоящий блок чтения старой версии"
+else
+    cat > "$TMP/live-version-test.sh" <<'SH'
+set -Eeuo pipefail
+VERSION_URL=https://fixture.invalid/version.json
+ROOT=/fixture
+PUBLISH_MODE=0
+SSH=(mock_ssh)
+log() { :; }
+curl() { printf '%s' "${TEST_BODY:-}"; return "$TEST_CURL_RC"; }
+mock_ssh() { printf '%s' "${TEST_CURRENT:-}"; }
+source "$1"
+printf '%s' "$CL_LIVE"
+SH
+    for fixture in first timeout fallback current; do
+        case "$fixture" in
+            first)    rc=22; body=''; current=''; expected='' ;;
+            timeout)  rc=28; body=''; current=''; expected='' ;;
+            fallback) rc=22; body=''; current='/fixture/releases/release-20261101-000000-abcdef1'; expected='release-20261101-000000-abcdef1' ;;
+            current)  rc=0; body='{"commit":"abcdef2","version":"release-v2"}'; current=''; expected='abcdef2' ;;
+        esac
+        if actual="$(TEST_CURL_RC="$rc" TEST_BODY="$body" TEST_CURRENT="$current" \
+            bash "$TMP/live-version-test.sh" "$TMP/live-version.sh")" && [[ "$actual" == "$expected" ]]; then
+            ok "старая версия: $fixture не прерывает выкатку, источник выбран верно"
+        else
+            bad "старая версия: $fixture прервал выкатку или выбрал неверный источник"
+        fi
+    done
+fi
+
 # --------------------------------------------------------------------------
 printf '\n\033[1mитого: %d прошло, %d провалено, %d пропущено\033[0m\n' "$pass" "$fail" "$skipped"
 (( skipped > 0 )) && printf 'пропуски — это не «прошло»: на раннере jq и python есть.\n'
