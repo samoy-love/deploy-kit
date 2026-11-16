@@ -184,6 +184,15 @@ else
         crt_cmd="openssl req -x509 -newkey rsa:2048 -nodes -keyout \"\$key\" -out \"\$crt\" -days 1 -subj '/CN=test' >/dev/null 2>&1"
     fi
 
+    cache_smoke=""
+    if [[ "$(basename "$CONF")" == chillhub-launcher.conf && -f "$kit_nginx/../ci/chillhub-modpack-cache-smoke.sh" ]]; then
+        cache_smoke="
+echo '$(b64 "$kit_nginx/../ci/chillhub-modpack-cache-smoke.sh")' | base64 -d > /tmp/chillhub-modpack-cache-smoke.sh
+nginx
+sh /tmp/chillhub-modpack-cache-smoke.sh /var/www/launcher https://127.0.0.1
+"
+    fi
+
     if docker run --rm -i --entrypoint sh "nginx:${NGINX_VERSION}-alpine" -s <<SCRIPT
 set -e
 mkdir -p /etc/nginx/sites-enabled /etc/nginx/snippets /etc/nginx/conf.d
@@ -224,6 +233,7 @@ for crt in \$(grep -hoE 'ssl_certificate[[:space:]]+[^;]+' /etc/nginx/sites-enab
 done
 
 nginx -t
+$cache_smoke
 SCRIPT
     then
         good "синтаксис принят nginx $NGINX_VERSION"
